@@ -119,7 +119,7 @@ def apply_style(theme: str, painter_style: str):
         .stButton>button {
             background-color: #1f2933; color: white; border-radius: 999px;
         }
-        .stTextInput>div>div>input, .stTextArea textarea, .stSelectbox>div>div {
+        .stTextInput>div>div>input, .stTextArea textarea, .stSelectbox>div>div, .stDateInput>div>div>input {
             background-color: #111827; color: #e5e7eb; border-radius: 0.5rem;
         }
         """
@@ -129,10 +129,41 @@ def apply_style(theme: str, painter_style: str):
         .stButton>button {
             background-color: #2563eb; color: white; border-radius: 999px;
         }
-        .stTextInput>div>div>input, .stTextArea textarea, .stSelectbox>div>div {
+        .stTextInput>div>div>input, .stTextArea textarea, .stSelectbox>div>div, .stDateInput>div>div>input {
             background-color: #ffffff; color: #111827; border-radius: 0.5rem;
         }
         """
+    # WOW status indicator extra CSS
+    css += """
+    .wow-card {
+        border-radius: 18px;
+        padding: 14px 18px;
+        margin-bottom: 0.75rem;
+        box-shadow: 0 14px 35px rgba(15,23,42,0.45);
+        color: #f9fafb;
+    }
+    .wow-card-title {
+        font-size: 0.85rem;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        opacity: 0.85;
+    }
+    .wow-card-main {
+        font-size: 1.4rem;
+        font-weight: 700;
+        margin-top: 4px;
+    }
+    .wow-badge {
+        display:inline-flex;
+        align-items:center;
+        padding:2px 10px;
+        border-radius:999px;
+        font-size:0.75rem;
+        font-weight:600;
+        background:rgba(15,23,42,0.2);
+        border:1px solid rgba(148,163,184,0.6);
+    }
+    """
     st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
 
 # =========================
@@ -342,7 +373,6 @@ def agent_run_ui(
     agents_cfg = st.session_state.get("agents_cfg", {})
     agents_dict = agents_cfg.get("agents", {})
 
-    # 找到 agent 設定，若不存在則給一個 fallback
     if agent_id in agents_dict:
         agent_cfg = agents_dict[agent_id]
     else:
@@ -456,19 +486,16 @@ def render_sidebar():
     with st.sidebar:
         st.markdown("### Global Settings")
 
-        # Theme
         st.session_state.settings["theme"] = st.radio(
             "Theme", ["Light", "Dark"],
             index=0 if st.session_state.settings["theme"] == "Light" else 1,
         )
 
-        # Language
         st.session_state.settings["language"] = st.radio(
             "Language", ["English", "繁體中文"],
             index=0 if st.session_state.settings["language"] == "English" else 1,
         )
 
-        # Painter style + Jackpot
         col1, col2 = st.columns([3, 1])
         with col1:
             style = st.selectbox(
@@ -482,7 +509,6 @@ def render_sidebar():
                 style = random.choice(PAINTER_STYLES)
         st.session_state.settings["painter_style"] = style
 
-        # Default model, tokens, temperature
         st.session_state.settings["model"] = st.selectbox(
             "Default Model",
             ALL_MODELS,
@@ -553,7 +579,7 @@ def render_sidebar():
                 st.error(f"Failed to parse uploaded YAML: {e}")
 
 # =========================
-# Tabs
+# Awesome Dashboard
 # =========================
 
 def render_dashboard():
@@ -573,7 +599,35 @@ def render_dashboard():
     with col3:
         st.metric("Approx Tokens Processed", int(df["tokens_est"].sum()))
 
-    st.subheader("Runs by Tab")
+    # WOW Status Wall (最近一次呼叫)
+    st.markdown("### WOW Status Wall – Latest Activity")
+    last = df.sort_values("ts", ascending=False).iloc[0]
+    wow_color = "linear-gradient(135deg,#22c55e,#16a34a)"  # 綠
+    if last["tokens_est"] > 40000:
+        wow_color = "linear-gradient(135deg,#f97316,#ea580c)"  # 橘
+    if last["tokens_est"] > 80000:
+        wow_color = "linear-gradient(135deg,#ef4444,#b91c1c)"  # 紅
+
+    st.markdown(
+        f"""
+        <div class="wow-card" style="background:{wow_color};">
+          <div class="wow-card-title">LATEST RUN SNAPSHOT</div>
+          <div class="wow-card-main">
+            {last['tab']} · {last['agent']}
+          </div>
+          <div style="margin-top:6px;font-size:0.9rem;">
+            Model: <b>{last['model']}</b> · Tokens ≈ <b>{last['tokens_est']}</b><br>
+            Time (UTC): {last['ts']}
+          </div>
+          <div style="margin-top:8px;">
+            <span class="wow-badge">Status: active</span>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("### Runs by Tab")
     chart_tab = alt.Chart(df).mark_bar().encode(
         x="tab:N",
         y="count():Q",
@@ -582,7 +636,7 @@ def render_dashboard():
     )
     st.altair_chart(chart_tab, use_container_width=True)
 
-    st.subheader("Runs by Model")
+    st.markdown("### Runs by Model")
     chart_model = alt.Chart(df).mark_bar().encode(
         x="model:N",
         y="count():Q",
@@ -591,7 +645,23 @@ def render_dashboard():
     )
     st.altair_chart(chart_model, use_container_width=True)
 
-    st.subheader("Token Usage Over Time")
+    # Awesome heatmap: Tab × Model usage
+    st.markdown("### Model × Tab Usage Heatmap")
+    heat_df = df.groupby(["tab", "model"]).size().reset_index(name="count")
+    heatmap = (
+        alt.Chart(heat_df)
+        .mark_rect()
+        .encode(
+            x=alt.X("model:N", title="Model"),
+            y=alt.Y("tab:N", title="Tab"),
+            color=alt.Color("count:Q", scale=alt.Scale(scheme="blues"), title="Runs"),
+            tooltip=["tab", "model", "count"],
+        )
+        .properties(height=260)
+    )
+    st.altair_chart(heatmap, use_container_width=True)
+
+    st.markdown("### Token Usage Over Time")
     df_time = df.copy()
     df_time["ts"] = pd.to_datetime(df_time["ts"])
     chart_time = alt.Chart(df_time).mark_line(point=True).encode(
@@ -602,12 +672,234 @@ def render_dashboard():
     )
     st.altair_chart(chart_time, use_container_width=True)
 
-    st.subheader("Recent Activity")
+    st.markdown("### Recent Activity")
     st.dataframe(df.sort_values("ts", ascending=False).head(25), use_container_width=True)
 
-# -------------------------
+# =========================
+# Helper for TW application schema
+# =========================
+
+TW_APP_FIELDS = [
+    "doc_no", "e_no", "apply_date", "case_type", "device_category", "case_kind",
+    "origin", "product_class", "similar", "replace_flag", "prior_app_no",
+    "name_zh", "name_en", "indications", "spec_comp",
+    "main_cat", "item_code", "item_name",
+    "uniform_id", "firm_name", "firm_addr",
+    "resp_name", "contact_name", "contact_tel", "contact_fax", "contact_email",
+    "confirm_match", "cert_raps", "cert_ahwp", "cert_other",
+    "manu_type", "manu_name", "manu_country", "manu_addr", "manu_note",
+    "auth_applicable", "auth_desc",
+    "cfs_applicable", "cfs_desc",
+    "qms_applicable", "qms_desc",
+    "similar_info", "labeling_info", "tech_file_info",
+    "preclinical_info", "preclinical_replace",
+    "clinical_just", "clinical_info",
+]
+
+def build_tw_app_dict_from_session() -> dict:
+    s = st.session_state
+    apply_date = s.get("tw_apply_date")
+    apply_date_str = apply_date.strftime("%Y-%m-%d") if apply_date else ""
+    return {
+        "doc_no": s.get("tw_doc_no", ""),
+        "e_no": s.get("tw_e_no", ""),
+        "apply_date": apply_date_str,
+        "case_type": s.get("tw_case_type", ""),
+        "device_category": s.get("tw_device_category", ""),
+        "case_kind": s.get("tw_case_kind", ""),
+        "origin": s.get("tw_origin", ""),
+        "product_class": s.get("tw_product_class", ""),
+        "similar": s.get("tw_similar", ""),
+        "replace_flag": s.get("tw_replace_flag", ""),
+        "prior_app_no": s.get("tw_prior_app_no", ""),
+        "name_zh": s.get("tw_dev_name_zh", ""),
+        "name_en": s.get("tw_dev_name_en", ""),
+        "indications": s.get("tw_indications", ""),
+        "spec_comp": s.get("tw_spec_comp", ""),
+        "main_cat": s.get("tw_main_cat", ""),
+        "item_code": s.get("tw_item_code", ""),
+        "item_name": s.get("tw_item_name", ""),
+        "uniform_id": s.get("tw_uniform_id", ""),
+        "firm_name": s.get("tw_firm_name", ""),
+        "firm_addr": s.get("tw_firm_addr", ""),
+        "resp_name": s.get("tw_resp_name", ""),
+        "contact_name": s.get("tw_contact_name", ""),
+        "contact_tel": s.get("tw_contact_tel", ""),
+        "contact_fax": s.get("tw_contact_fax", ""),
+        "contact_email": s.get("tw_contact_email", ""),
+        "confirm_match": bool(s.get("tw_confirm_match", False)),
+        "cert_raps": bool(s.get("tw_cert_raps", False)),
+        "cert_ahwp": bool(s.get("tw_cert_ahwp", False)),
+        "cert_other": s.get("tw_cert_other", ""),
+        "manu_type": s.get("tw_manu_type", ""),
+        "manu_name": s.get("tw_manu_name", ""),
+        "manu_country": s.get("tw_manu_country", ""),
+        "manu_addr": s.get("tw_manu_addr", ""),
+        "manu_note": s.get("tw_manu_note", ""),
+        "auth_applicable": s.get("tw_auth_app", ""),
+        "auth_desc": s.get("tw_auth_desc", ""),
+        "cfs_applicable": s.get("tw_cfs_app", ""),
+        "cfs_desc": s.get("tw_cfs_desc", ""),
+        "qms_applicable": s.get("tw_qms_app", ""),
+        "qms_desc": s.get("tw_qms_desc", ""),
+        "similar_info": s.get("tw_similar_info", ""),
+        "labeling_info": s.get("tw_labeling_info", ""),
+        "tech_file_info": s.get("tw_tech_file_info", ""),
+        "preclinical_info": s.get("tw_preclinical_info", ""),
+        "preclinical_replace": s.get("tw_preclinical_replace", ""),
+        "clinical_just": s.get("tw_clinical_app", ""),
+        "clinical_info": s.get("tw_clinical_info", ""),
+    }
+
+def apply_tw_app_dict_to_session(data: dict):
+    # 將標準化 dict 寫入 session_state，以更新表單
+    s = st.session_state
+    s["tw_doc_no"] = data.get("doc_no", "")
+    s["tw_e_no"] = data.get("e_no", "")
+    # 日期
+    from datetime import date
+    try:
+        if data.get("apply_date"):
+            y, m, d = map(int, str(data["apply_date"]).split("-"))
+            s["tw_apply_date"] = date(y, m, d)
+    except Exception:
+        pass
+    s["tw_case_type"] = data.get("case_type", "")
+    s["tw_device_category"] = data.get("device_category", "")
+    s["tw_case_kind"] = data.get("case_kind", "")
+    s["tw_origin"] = data.get("origin", "")
+    s["tw_product_class"] = data.get("product_class", "")
+    s["tw_similar"] = data.get("similar", "")
+    s["tw_replace_flag"] = data.get("replace_flag", "")
+    s["tw_prior_app_no"] = data.get("prior_app_no", "")
+    s["tw_dev_name_zh"] = data.get("name_zh", "")
+    s["tw_dev_name_en"] = data.get("name_en", "")
+    s["tw_indications"] = data.get("indications", "")
+    s["tw_spec_comp"] = data.get("spec_comp", "")
+    s["tw_main_cat"] = data.get("main_cat", "")
+    s["tw_item_code"] = data.get("item_code", "")
+    s["tw_item_name"] = data.get("item_name", "")
+    s["tw_uniform_id"] = data.get("uniform_id", "")
+    s["tw_firm_name"] = data.get("firm_name", "")
+    s["tw_firm_addr"] = data.get("firm_addr", "")
+    s["tw_resp_name"] = data.get("resp_name", "")
+    s["tw_contact_name"] = data.get("contact_name", "")
+    s["tw_contact_tel"] = data.get("contact_tel", "")
+    s["tw_contact_fax"] = data.get("contact_fax", "")
+    s["tw_contact_email"] = data.get("contact_email", "")
+    s["tw_confirm_match"] = bool(data.get("confirm_match", False))
+    s["tw_cert_raps"] = bool(data.get("cert_raps", False))
+    s["tw_cert_ahwp"] = bool(data.get("cert_ahwp", False))
+    s["tw_cert_other"] = data.get("cert_other", "")
+    s["tw_manu_type"] = data.get("manu_type", "")
+    s["tw_manu_name"] = data.get("manu_name", "")
+    s["tw_manu_country"] = data.get("manu_country", "")
+    s["tw_manu_addr"] = data.get("manu_addr", "")
+    s["tw_manu_note"] = data.get("manu_note", "")
+    s["tw_auth_app"] = data.get("auth_applicable", "")
+    s["tw_auth_desc"] = data.get("auth_desc", "")
+    s["tw_cfs_app"] = data.get("cfs_applicable", "")
+    s["tw_cfs_desc"] = data.get("cfs_desc", "")
+    s["tw_qms_app"] = data.get("qms_applicable", "")
+    s["tw_qms_desc"] = data.get("qms_desc", "")
+    s["tw_similar_info"] = data.get("similar_info", "")
+    s["tw_labeling_info"] = data.get("labeling_info", "")
+    s["tw_tech_file_info"] = data.get("tech_file_info", "")
+    s["tw_preclinical_info"] = data.get("preclinical_info", "")
+    s["tw_preclinical_replace"] = data.get("preclinical_replace", "")
+    s["tw_clinical_app"] = data.get("clinical_just", "")
+    s["tw_clinical_info"] = data.get("clinical_info", "")
+
+def standardize_tw_app_info_with_llm(raw_obj) -> dict:
+    """
+    使用 LLM 將任意 JSON/欄位對映成標準 TFDA 申請書 schema。
+    需要 Gemini API (預設使用 gemini-2.5-flash)。
+    """
+    api_keys = st.session_state.get("api_keys", {})
+    model = "gemini-2.5-flash"
+    if "gemini" not in api_keys and not os.getenv("GEMINI_API_KEY"):
+        raise RuntimeError("No Gemini API key available for standardizing application info.")
+
+    raw_json = json.dumps(raw_obj, ensure_ascii=False, indent=2)
+    fields_str = ", ".join(TW_APP_FIELDS)
+
+    system_prompt = f"""
+You are a data normalization assistant for a Taiwanese TFDA medical device premarket application.
+
+Goal:
+Map arbitrary JSON or CSV-like key/value structures into a STANDARD JSON object
+that uses EXACTLY the following top-level keys (all strings except where noted):
+
+{fields_str}
+
+Rules:
+- Output MUST be a single JSON object (no markdown, no comments).
+- Every key above MUST appear in the JSON.
+- If information for a field is clearly not present, set it to an empty string,
+  or for boolean-like fields use `false`.
+- Map semantically similar keys (e.g. 'device_name_zh', 'cn_name') to 'name_zh', etc.
+- `apply_date` should be string like 'YYYY-MM-DD' if you can infer; otherwise empty string.
+- Do NOT invent new facts; just reorganize/rename what exists.
+"""
+
+    user_prompt = f"Here is the raw data to normalize:\n\n{raw_json}"
+
+    out = call_llm(
+        model=model,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        max_tokens=4000,
+        temperature=0.1,
+        api_keys=api_keys,
+    )
+
+    # 嘗試 parse JSON
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        # 嘗試截斷到第一個/最後一個大括號
+        start = out.find("{")
+        end = out.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            data = json.loads(out[start:end + 1])
+        else:
+            raise RuntimeError("LLM did not return valid JSON for application info.")
+    if not isinstance(data, dict):
+        raise RuntimeError("Standardized application info is not a JSON object.")
+    # 確保所有欄位存在
+    for k in TW_APP_FIELDS:
+        if k not in data:
+            data[k] = "" if k not in ("confirm_match", "cert_raps", "cert_ahwp") else False
+    return data
+
+def compute_tw_app_completeness() -> float:
+    """
+    計算 TFDA 申請書基本必填欄位的完成度 (0~1)
+    """
+    s = st.session_state
+    required_keys = [
+        "tw_e_no", "tw_case_type", "tw_device_category",
+        "tw_origin", "tw_product_class",
+        "tw_dev_name_zh", "tw_dev_name_en",
+        "tw_uniform_id", "tw_firm_name", "tw_firm_addr",
+        "tw_resp_name", "tw_contact_name", "tw_contact_tel",
+        "tw_contact_email",
+        "tw_manu_name", "tw_manu_addr",
+    ]
+    filled = 0
+    for k in required_keys:
+        v = s.get(k, "")
+        if isinstance(v, str):
+            if v.strip():
+                filled += 1
+        else:
+            if v:
+                filled += 1
+    return filled / len(required_keys) if required_keys else 0.0
+
+# =========================
 # TW Premarket Tab
-# -------------------------
+# =========================
 
 def render_tw_premarket_tab():
     """臺灣第二、三等級醫療器材查驗登記 – 預審/形式審查 Tab"""
@@ -617,7 +909,7 @@ def render_tw_premarket_tab():
         """
         <div style="background:#eef2ff;border-radius:12px;padding:10px 14px;
                     border:1px solid #c7d2fe;margin-bottom:0.75rem;">
-          <b>Step 1.</b> 線上填寫「第二、三等級醫療器材查驗登記申請」主要欄位（草稿）。<br>
+          <b>Step 1.</b> 線上填寫或由 JSON/CSV 匯入「第二、三等級醫療器材查驗登記申請」主要欄位。<br>
           <b>Step 2.</b> 貼上或上傳「預審/形式審查指引」供 AI 進行完整性檢核。<br>
           <b>Step 3.</b> 產出預審摘要報告 (Markdown)，可在頁面上修改。<br>
           <b>Step 4.</b> 以 AI 協助編修申請書內容，或把輸出串接到下一個 agent。
@@ -625,6 +917,101 @@ def render_tw_premarket_tab():
         """,
         unsafe_allow_html=True,
     )
+
+    # -----------------------------
+    # Import / Export Application Info (CSV / JSON)
+    # -----------------------------
+    st.markdown("### Application Info 匯入 / 匯出 (JSON / CSV)")
+
+    col_ie1, col_ie2 = st.columns(2)
+    with col_ie1:
+        st.markdown("**上傳 Application Info**")
+        app_file = st.file_uploader(
+            "Upload Application Info (JSON / CSV)",
+            type=["json", "csv"],
+            key="tw_app_upload",
+        )
+        if app_file is not None:
+            try:
+                if app_file.name.lower().endswith(".json"):
+                    raw_data = json.load(app_file)
+                else:
+                    df = pd.read_csv(app_file)
+                    if len(df) == 0:
+                        st.error("CSV 檔案為空。")
+                        raw_data = None
+                    else:
+                        raw_data = df.to_dict(orient="records")[0]
+                if raw_data is not None:
+                    # 檢查是否已是標準格式
+                    if isinstance(raw_data, dict) and all(k in raw_data for k in TW_APP_FIELDS):
+                        standardized = raw_data
+                    else:
+                        with st.spinner("使用 LLM 將欄位轉為標準 TFDA 申請書格式..."):
+                            standardized = standardize_tw_app_info_with_llm(raw_data)
+                    apply_tw_app_dict_to_session(standardized)
+                    st.success("已將上傳資料轉換並套用至申請表單。")
+                    st.session_state["tw_app_last_loaded"] = standardized
+                    st.experimental_rerun()
+            except Exception as e:
+                st.error(f"上傳或標準化失敗：{e}")
+
+    with col_ie2:
+        st.markdown("**下載 Application Info**")
+        app_dict = build_tw_app_dict_from_session()
+        # JSON
+        json_bytes = json.dumps(app_dict, ensure_ascii=False, indent=2).encode("utf-8")
+        st.download_button(
+            "Download JSON",
+            data=json_bytes,
+            file_name="tw_premarket_application.json",
+            mime="application/json",
+            key="tw_app_download_json",
+        )
+        # CSV
+        df_app = pd.DataFrame([app_dict])
+        csv_bytes = df_app.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "Download CSV",
+            data=csv_bytes,
+            file_name="tw_premarket_application.csv",
+            mime="text/csv",
+            key="tw_app_download_csv",
+        )
+
+    # JSON 預覽
+    if "tw_app_last_loaded" in st.session_state:
+        st.markdown("**最近載入/標準化之 Application JSON 預覽**")
+        st.json(st.session_state["tw_app_last_loaded"], expanded=False)
+
+    st.markdown("---")
+
+    # -----------------------------
+    # WOW Application Status Indicator
+    # -----------------------------
+    completeness = compute_tw_app_completeness()
+    pct = int(completeness * 100)
+    if pct >= 80:
+        card_grad = "linear-gradient(135deg,#22c55e,#16a34a)"
+        txt = "申請基本欄位完成度高，適合進行預審。"
+    elif pct >= 50:
+        card_grad = "linear-gradient(135deg,#f97316,#ea580c)"
+        txt = "部分關鍵欄位仍待補齊，建議補足後再送預審。"
+    else:
+        card_grad = "linear-gradient(135deg,#ef4444,#b91c1c)"
+        txt = "多數基本欄位尚未填寫，請先充實申請資訊。"
+
+    st.markdown(
+        f"""
+        <div class="wow-card" style="background:{card_grad};margin-top:0;">
+          <div class="wow-card-title">APPLICATION COMPLETENESS</div>
+          <div class="wow-card-main">{pct}%</div>
+          <div style="margin-top:6px;font-size:0.9rem;">{txt}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.progress(completeness)
 
     # -----------------------------
     # Step 1 – 線上申請書草稿
@@ -640,7 +1027,7 @@ def render_tw_premarket_tab():
     col_a1, col_a2, col_a3 = st.columns(3)
     with col_a1:
         doc_no = st.text_input("公文文號", key="tw_doc_no")
-        e_no = st.text_input("電子流水號", value="MDE", key="tw_e_no")
+        e_no = st.text_input("電子流水號", value=st.session_state.get("tw_e_no", "MDE"), key="tw_e_no")
     with col_a2:
         apply_date = st.date_input("申請日", key="tw_apply_date")
         case_type = st.selectbox(
@@ -669,7 +1056,7 @@ def render_tw_premarket_tab():
         replace_flag = st.radio(
             "是否勾選「替代臨床前測試及原廠品質管制資料」？*",
             ["否", "是"],
-            index=0,
+            index=0 if st.session_state.get("tw_replace_flag", "否") == "否" else 1,
             key="tw_replace_flag",
         )
     with col_a8:
@@ -682,8 +1069,8 @@ def render_tw_premarket_tab():
         name_zh = st.text_input("醫療器材中文名稱*", key="tw_dev_name_zh")
         name_en = st.text_input("醫療器材英文名稱*", key="tw_dev_name_en")
     with col_b2:
-        indications = st.text_area("效能、用途或適應症說明", value="詳如核定之中文說明書", key="tw_indications")
-        spec_comp = st.text_area("型號、規格或主要成分說明", value="詳如核定之中文說明書", key="tw_spec_comp")
+        indications = st.text_area("效能、用途或適應症說明", value=st.session_state.get("tw_indications", "詳如核定之中文說明書"), key="tw_indications")
+        spec_comp = st.text_area("型號、規格或主要成分說明", value=st.session_state.get("tw_spec_comp", "詳如核定之中文說明書"), key="tw_spec_comp")
 
     st.markdown("**分類分級品項（依《醫療器材分類分級管理辦法》附表填列）**")
     col_b3, col_b4, col_b5 = st.columns(3)
@@ -771,7 +1158,6 @@ def render_tw_premarket_tab():
         manu_addr = st.text_area("製造廠地址*", height=80, key="tw_manu_addr")
         manu_note = st.text_area("製造廠相關說明（如(O)/(P)製造、委託範圍）", height=80, key="tw_manu_note")
 
-    # 簡化版附件摘要欄
     with st.expander("附件摘要：原廠授權、出產國製售證明、QMS/QSD、技術檔案、臨床資料等", expanded=False):
         auth_applicable = st.selectbox("原廠授權登記書", ["不適用", "適用"], key="tw_auth_app")
         auth_desc = st.text_area("原廠授權登記書資料說明", height=80, key="tw_auth_desc")
@@ -963,9 +1349,7 @@ def render_tw_premarket_tab():
 
     st.markdown("---")
 
-    # -----------------------------
     # Step 2 – 預審指引
-    # -----------------------------
     st.markdown("### Step 2 – 輸入預審/形式審查指引（Screen Review Guidance）")
 
     col_g1, col_g2 = st.columns(2)
@@ -999,9 +1383,7 @@ def render_tw_premarket_tab():
 
     st.markdown("---")
 
-    # -----------------------------
     # Step 3 – 形式審查 / 完整性檢核
-    # -----------------------------
     st.markdown("### Step 3 – 形式審查 / 完整性檢核（Agent）")
 
     if "tw_app_effective_md" not in st.session_state or not st.session_state["tw_app_effective_md"].strip():
@@ -1062,9 +1444,7 @@ def render_tw_premarket_tab():
 
     st.markdown("---")
 
-    # -----------------------------
     # Step 4 – AI 協助編修申請書內容
-    # -----------------------------
     st.markdown("### Step 4 – AI 協助編修申請書內容")
 
     helper_default_prompt = """你是一位協助臺灣醫療器材查驗登記申請人的文件撰寫助手。
@@ -1086,9 +1466,9 @@ def render_tw_premarket_tab():
         tab_label_for_history="TW Application Doc Helper",
     )
 
-# -------------------------
-# 510(k) Intelligence (簡化)
-# -------------------------
+# =========================
+# 510(k) Tab
+# =========================
 
 def render_510k_tab():
     st.title(t("510k_tab"))
@@ -1133,9 +1513,9 @@ Additional context:
         tab_label_for_history="510(k) Intelligence",
     )
 
-# -------------------------
-# PDF → Markdown (簡化)
-# -------------------------
+# =========================
+# PDF → Markdown Tab
+# =========================
 
 def render_pdf_to_md_tab():
     st.title(t("PDF → Markdown"))
@@ -1177,9 +1557,9 @@ Language: {st.session_state.settings["language"]}.
     else:
         st.info("Upload a PDF and click 'Extract Text' to begin.")
 
-# -------------------------
-# 510(k) Review Pipeline (簡化)
-# -------------------------
+# =========================
+# 510(k) Review Pipeline Tab
+# =========================
 
 def render_510k_review_pipeline_tab():
     st.title(t("Checklist & Report"))
@@ -1230,7 +1610,7 @@ Do not invent new facts; only reorganize and clarify.
         st.info("Structured submission will appear here.")
 
     st.markdown("---")
-    st.markdown("### Step 2 – Checklist → Markdown & Step 3 – 合併產生 Review Report")
+    st.markdown("### Step 2 – Checklist（貼上或由其它 Agent 產生） & Step 3 – Review Report")
 
     chk_md = st.text_area(
         "Paste checklist (markdown or text)",
@@ -1279,9 +1659,9 @@ Using the checklist and structured submission, write a concise review report wit
         st.markdown("#### Review Report (editable)")
         st.text_area("Review Report (Markdown)", value=rep_md, height=260, key="rep_md_edited")
 
-# -------------------------
+# =========================
 # Note Keeper & Magics
-# -------------------------
+# =========================
 
 def highlight_keywords(text: str, keywords: list[str], color: str) -> str:
     if not text or not keywords:
@@ -1383,7 +1763,7 @@ def render_note_keeper_tab():
 
     base_note = st.session_state.get("note_effective", "")
 
-    # --- Magic 1: AI Formatting ---
+    # Magic 1 – AI Formatting
     st.markdown("---")
     st.markdown("### Magic 1 – AI Formatting")
 
@@ -1430,7 +1810,7 @@ def render_note_keeper_tab():
             key="fmt_note_edited",
         )
 
-    # --- Magic 2: AI Keywords (顏色可選，不用 LLM) ---
+    # Magic 2 – AI Keywords (Manual highlight)
     st.markdown("---")
     st.markdown("### Magic 2 – AI Keywords (Manual highlight)")
 
@@ -1454,7 +1834,7 @@ def render_note_keeper_tab():
         st.markdown("#### Note with Highlighted Keywords (Markdown rendering)")
         st.markdown(kw_note, unsafe_allow_html=True)
 
-    # --- Magic 3: AI Summary ---
+    # Magic 3 – AI Summary
     st.markdown("---")
     st.markdown("### Magic 3 – AI Summary")
 
@@ -1500,9 +1880,9 @@ def render_note_keeper_tab():
             key="note_summary_edited",
         )
 
-    # --- Magic 4: AI Action Items ---
+    # Magic 4 – AI Action Items
     st.markdown("---")
-    st.markdown("### Magic 4 – AI Action Items (待辦與補件清單)")
+    st.markdown("### Magic 4 – AI Action Items")
 
     act_model = st.selectbox(
         "Model (Action Items)",
@@ -1546,7 +1926,7 @@ def render_note_keeper_tab():
             key="note_actions_edited",
         )
 
-    # --- Magic 5: AI Glossary ---
+    # Magic 5 – AI Glossary
     st.markdown("---")
     st.markdown("### Magic 5 – AI Glossary (術語表)")
 
@@ -1592,9 +1972,9 @@ def render_note_keeper_tab():
             key="note_glossary_edited",
         )
 
-# -------------------------
-# Agents Config Studio
-# -------------------------
+# =========================
+# Agents Config Tab
+# =========================
 
 def render_agents_config_tab():
     st.title(t("Agents Config"))
@@ -1697,7 +2077,6 @@ if "agents_cfg" not in st.session_state:
         with open("agents.yaml", "r", encoding="utf-8") as f:
             st.session_state["agents_cfg"] = yaml.safe_load(f)
     except Exception:
-        # minimal fallback
         st.session_state["agents_cfg"] = {
             "agents": {
                 "fda_510k_intel_agent": {
@@ -1705,24 +2084,28 @@ if "agents_cfg" not in st.session_state:
                     "model": "gpt-4o-mini",
                     "system_prompt": "You are an FDA 510(k) analyst.",
                     "max_tokens": 12000,
+                    "category": "FDA 510(k)",
                 },
                 "pdf_to_markdown_agent": {
                     "name": "PDF to Markdown Agent",
                     "model": "gemini-2.5-flash",
                     "system_prompt": "You convert PDF-extracted text into clean markdown.",
                     "max_tokens": 12000,
+                    "category": "文件前處理",
                 },
                 "tw_screen_review_agent": {
-                    "name": "TW Premarket Screen Review Agent",
+                    "name": "TFDA 預審形式審查代理",
                     "model": "gemini-2.5-flash",
                     "system_prompt": "You are a TFDA premarket screen reviewer.",
                     "max_tokens": 12000,
+                    "category": "TFDA Premarket",
                 },
                 "tw_app_doc_helper": {
-                    "name": "TW Application Doc Helper",
+                    "name": "TFDA 申請書撰寫助手",
                     "model": "gpt-4o-mini",
                     "system_prompt": "You help improve TFDA application documents.",
                     "max_tokens": 12000,
+                    "category": "TFDA Premarket",
                 },
             }
         }
