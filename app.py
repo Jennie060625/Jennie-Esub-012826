@@ -1,4 +1,6 @@
 import os
+import json
+import base64
 from datetime import datetime
 from io import BytesIO
 
@@ -9,16 +11,21 @@ import altair as alt
 from pypdf import PdfReader
 
 try:
-    from docx import Document  # provided by python-docx
+    from docx import Document  # python-docx
 except ImportError:
     Document = None
 
-# External LLM clients
+try:
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import letter
+except ImportError:
+    canvas = None
+    letter = None
+
 from openai import OpenAI
 import google.generativeai as genai
 from anthropic import Anthropic
 import httpx
-
 
 # =========================
 # Constants & configuration
@@ -29,7 +36,6 @@ ALL_MODELS = [
     "gpt-4.1-mini",
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
-    "gemini-3-flash-preview",
     "claude-3-5-sonnet-2024-10",
     "claude-3-5-haiku-20241022",
     "grok-4-fast-reasoning",
@@ -37,374 +43,101 @@ ALL_MODELS = [
 ]
 
 OPENAI_MODELS = {"gpt-4o-mini", "gpt-4.1-mini"}
-GEMINI_MODELS = {"gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3-flash-preview"}
-ANTHROPIC_MODELS = {"claude-3-5-sonnet-2024-10", "claude-3-5-haiku-20241022"}
+GEMINI_MODELS = {"gemini-2.5-flash", "gemini-2.5-flash-lite"}
+ANTHROPIC_MODELS = {
+    "claude-3-5-sonnet-2024-10",
+    "claude-3-5-haiku-20241022",
+}
 GROK_MODELS = {"grok-4-fast-reasoning", "grok-3-mini"}
 
 PAINTER_STYLES = [
     "Van Gogh", "Monet", "Picasso", "Da Vinci", "Rembrandt",
     "Matisse", "Kandinsky", "Hokusai", "Yayoi Kusama", "Frida Kahlo",
     "Salvador Dali", "Rothko", "Pollock", "Chagall", "Basquiat",
-    "Haring", "Georgia O'Keeffe", "Turner", "Seurat", "Escher"
+    "Haring", "Georgia O'Keeffe", "Turner", "Seurat", "Escher",
 ]
 
-# Localized labels for tabs
 LABELS = {
     "Dashboard": {"English": "Dashboard", "繁體中文": "儀表板"},
+    "TW Premarket": {
+        "English": "TW Premarket Application",
+        "繁體中文": "第二、三等級醫療器材查驗登記",
+    },
     "510k_tab": {"English": "510(k) Intelligence", "繁體中文": "510(k) 智能分析"},
     "PDF → Markdown": {"English": "PDF → Markdown", "繁體中文": "PDF → Markdown"},
-    "Summary & Entities": {"English": "Summary & Entities", "繁體中文": "綜合摘要與實體"},
-    "Comparator": {"English": "Comparator", "繁體中文": "文件版本比較"},
-    "Checklist & Report": {"English": "Checklist & Report", "繁體中文": "審查清單與報告"},
-    "Note Keeper & Magics": {"English": "Note Keeper & Magics", "繁體中文": "筆記助手與魔法"},
-    "FDA Orchestration": {"English": "FDA Reviewer Orchestration", "繁體中文": "FDA 審查協同規劃"},
-    "Dynamic Agents": {"English": "Dynamic Agents from Guidance", "繁體中文": "依據指引動態產生代理"},
-    "SKILL Panel": {"English": "System Skills (SKILL.md)", "繁體中文": "系統技能說明（SKILL.md）"},
+    "Checklist & Report": {
+        "English": "510(k) Review Pipeline",
+        "繁體中文": "510(k) 審查全流程",
+    },
+    "Note Keeper & Magics": {
+        "English": "Note Keeper & Magics",
+        "繁體中文": "筆記助手與魔法",
+    },
+    "Agents Config": {
+        "English": "Agents Config Studio",
+        "繁體中文": "代理設定工作室",
+    },
 }
 
-# Painter style CSS snippets (simple examples)
 STYLE_CSS = {
-    "Van Gogh": """
-      .stApp {
-        background: radial-gradient(circle at top left, #243B55, #141E30);
-      }
-    """,
-    "Monet": """
-      .stApp {
-        background: linear-gradient(120deg, #a1c4fd, #c2e9fb);
-      }
-    """,
-    "Picasso": """
-      .stApp {
-        background: linear-gradient(135deg, #ff9a9e, #fecfef);
-      }
-    """,
-    "Da Vinci": """
-      .stApp {
-        background: radial-gradient(circle, #f9f1c6, #c9a66b);
-      }
-    """,
-    "Rembrandt": """
-      .stApp {
-        background: radial-gradient(circle, #2c1810, #0b090a);
-      }
-    """,
-    "Matisse": """
-      .stApp {
-        background: linear-gradient(135deg, #ffecd2, #fcb69f);
-      }
-    """,
-    "Kandinsky": """
-      .stApp {
-        background: linear-gradient(135deg, #00c6ff, #0072ff);
-      }
-    """,
-    "Hokusai": """
-      .stApp {
-        background: linear-gradient(135deg, #2b5876, #4e4376);
-      }
-    """,
-    "Yayoi Kusama": """
-      .stApp {
-        background: radial-gradient(circle, #ffdd00, #ff6a00);
-      }
-    """,
-    "Frida Kahlo": """
-      .stApp {
-        background: linear-gradient(135deg, #f8b195, #f67280, #c06c84);
-      }
-    """,
-    "Salvador Dali": """
-      .stApp {
-        background: linear-gradient(135deg, #1a2a6c, #b21f1f, #fdbb2d);
-      }
-    """,
-    "Rothko": """
-      .stApp {
-        background: linear-gradient(135deg, #141E30, #243B55);
-      }
-    """,
-    "Pollock": """
-      .stApp {
-        background: repeating-linear-gradient(
-          45deg,
-          #222,
-          #222 10px,
-          #333 10px,
-          #333 20px
-        );
-      }
-    """,
-    "Chagall": """
-      .stApp {
-        background: linear-gradient(135deg, #a18cd1, #fbc2eb);
-      }
-    """,
-    "Basquiat": """
-      .stApp {
-        background: linear-gradient(135deg, #f7971e, #ffd200);
-      }
-    """,
-    "Haring": """
-      .stApp {
-        background: linear-gradient(135deg, #ff512f, #dd2476);
-      }
-    """,
-    "Georgia O'Keeffe": """
-      .stApp {
-        background: linear-gradient(135deg, #ffefba, #ffffff);
-      }
-    """,
-    "Turner": """
-      .stApp {
-        background: linear-gradient(135deg, #f8ffae, #43c6ac);
-      }
-    """,
-    "Seurat": """
-      .stApp {
-        background: radial-gradient(circle, #e0eafc, #cfdef3);
-      }
-    """,
-    "Escher": """
-      .stApp {
-        background: linear-gradient(135deg, #232526, #414345);
-      }
-    """,
+    "Van Gogh": "body { background: radial-gradient(circle at top left, #243B55, #141E30); }",
+    "Monet": "body { background: linear-gradient(120deg, #a1c4fd, #c2e9fb); }",
+    "Picasso": "body { background: linear-gradient(135deg, #ff9a9e, #fecfef); }",
+    "Da Vinci": "body { background: radial-gradient(circle, #f9f1c6, #c9a66b); }",
+    "Rembrandt": "body { background: radial-gradient(circle, #2c1810, #0b090a); }",
+    "Matisse": "body { background: linear-gradient(135deg, #ffecd2, #fcb69f); }",
+    "Kandinsky": "body { background: linear-gradient(135deg, #00c6ff, #0072ff); }",
+    "Hokusai": "body { background: linear-gradient(135deg, #2b5876, #4e4376); }",
+    "Yayoi Kusama": "body { background: radial-gradient(circle, #ffdd00, #ff6a00); }",
+    "Frida Kahlo": "body { background: linear-gradient(135deg, #f8b195, #f67280, #c06c84); }",
+    "Salvador Dali": "body { background: linear-gradient(135deg, #1a2a6c, #b21f1f, #fdbb2d); }",
+    "Rothko": "body { background: linear-gradient(135deg, #141E30, #243B55); }",
+    "Pollock": "body { background: repeating-linear-gradient(45deg,#222,#222 10px,#333 10px,#333 20px); }",
+    "Chagall": "body { background: linear-gradient(135deg, #a18cd1, #fbc2eb); }",
+    "Basquiat": "body { background: linear-gradient(135deg, #f7971e, #ffd200); }",
+    "Haring": "body { background: linear-gradient(135deg, #ff512f, #dd2476); }",
+    "Georgia O'Keeffe": "body { background: linear-gradient(135deg, #ffefba, #ffffff); }",
+    "Turner": "body { background: linear-gradient(135deg, #f8ffae, #43c6ac); }",
+    "Seurat": "body { background: radial-gradient(circle, #e0eafc, #cfdef3); }",
+    "Escher": "body { background: linear-gradient(135deg, #232526, #414345); }",
 }
 
 # =========================
-# FDA Orchestrator Prompts
-# =========================
-
-FDA_ORCH_SYSTEM_PROMPT = """
-You are an expert FDA review orchestrator with comprehensive knowledge of medical 
-device regulatory review processes. Your role is to analyze device information 
-and intelligently recommend which specialized review agents should be used, in 
-what sequence, and with what priority.
-
-Use the agent catalog (agents.yaml content) provided to you as the universe of available
-agents. Map device characteristics to these agents, following this framework:
-
-[THE FULL SPEC FROM USER – STEPS 1–4, TABLE FORMATS, AGENT CATEGORIES, 
-MANDATORY CORE AGENTS, CONDITIONAL AGENTS, DEVICE-SPECIFIC SPECIALISTS,
-PHASES 1–4, OUTPUT FORMAT, TIMELINE, FOCUS AREAS, CHALLENGES, AGENT COMMANDS, etc.]
-
-Be thorough, specific, and provide clear rationale for each agent recommendation.
-Tailor your response to the specific device characteristics provided.
-If information is incomplete, note what additional details would refine the recommendation.
-"""
-
-FDA_ORCH_USER_TEMPLATE = """
-Please analyze the following medical device information and provide a comprehensive 
-review orchestration plan with recommended specialized agents:
-
-**DEVICE INFORMATION:**
-
-```
-{device_information}
-```
-
-**ADDITIONAL CONTEXT** (if provided):
-- Submission Type: {submission_type}
-- Regulatory Pathway: {regulatory_pathway}
-- Known Predicates: {known_predicates}
-- Clinical Data Available: {clinical_data_status}
-- Special Circumstances: {special_circumstances}
-
-**REQUESTED ANALYSIS DEPTH:**
-- {depth_quick}
-- {depth_standard}
-- {depth_comprehensive}
-
-Based on this information, please provide:
-
-1. **Device Classification Analysis** - Determine device type, CFR part, risk class
-2. **Comprehensive Agent Recommendation** - All applicable agents organized by phase
-3. **Execution Sequence** - Optimal order and parallelization opportunities
-4. **Timeline Estimate** - Realistic review timeline
-5. **Critical Focus Areas** - What reviewers must pay special attention to
-6. **Anticipated Challenges** - Potential regulatory hurdles
-7. **Execution Commands** - Ready-to-use commands for running agents
-
-If any device information is unclear or incomplete, please note what additional 
-details would help refine your recommendations.
-
-Use only agents that exist in the provided agents.yaml catalog. 
-Return the orchestration plan in well-structured markdown with all required tables.
-"""
-
-# =========================
-# Dynamic Agent Generator Prompt
-# =========================
-
-DYNAMIC_AGENT_SYSTEM_PROMPT = """
-You are a regulatory agent designer. Your job is to look at FDA guidance content
-(and optionally an existing review checklist) and generate NEW specialized review
-agents in YAML format that can be added to agents.yaml.
-
-Requirements:
-
-1. Output valid YAML defining between 3 and 8 agents under a top-level key `agents`.
-2. Each agent must include at least:
-   - agent_id: string (e.g., "AGENT-200")
-   - name: descriptive name
-   - version: "1.0"
-   - category: a high-level category such as "Core Review", "Specialized Analysis",
-     "Device-Specific Expert", or "Workflow Utility"
-   - description: 1–2 sentence description of what the agent does
-   - model: pick a realistic default (e.g., "gpt-4o-mini" or "gemini-2.5-flash")
-   - temperature: float (0.1–0.4 for deterministic regulatory work)
-   - max_tokens: integer (e.g., 16000–22000)
-   - system_prompt: detailed instructions for the agent, grounded in the guidance
-   - user_prompt_template: with placeholders for user inputs
-   - output_requirements: structured object describing min tables/sections/etc.
-   - validation_rules: simple checks (e.g., require_sections, check_table_count)
-
-3. Agents must be clearly tied to sections of the FDA guidance. For example:
-   - A "Performance Testing Matrix Builder" agent that converts guidance testing
-     requirements into a matrix.
-   - A "Benefit-Risk Focused Reviewer" agent for guidance sections on benefit-risk.
-   - A "Human Factors & Usability Reviewer" agent for HF-focused guidance.
-
-4. Do NOT repeat agents that already exist in the provided agents.yaml catalog.
-   Create complementary, non-duplicative capabilities.
-
-5. Use descriptions and prompt templates similar in richness and style to the
-   existing default agents (e.g., intelligence_analyst, guidance_to_checklist_converter).
-
-Return ONLY YAML. Do not wrap it in markdown backticks.
-"""
-
-# =========================
-# Helper functions
+# Helper: localization & style
 # =========================
 
 def t(key: str) -> str:
-    """Translate label key based on current language."""
     lang = st.session_state.settings.get("language", "English")
     return LABELS.get(key, {}).get(lang, key)
 
 
-def load_skill_md() -> str:
-    """Load SKILL.md content if present (for UI help / capabilities overview)."""
-    try:
-        with open("SKILL.md", "r", encoding="utf-8") as f:
-            return f.read()
-    except Exception:
-        return ""
-
-
 def apply_style(theme: str, painter_style: str):
-    """Apply painter-based WOW CSS, theme adjustments, and animated status indicators."""
     css = STYLE_CSS.get(painter_style, "")
-
-    base_css = """
-      * {
-        scroll-behavior: smooth;
-      }
-      .stApp {
-        transition: background 0.3s ease;
-      }
-      /* Card-like containers */
-      .block-container {
-        padding-top: 1.5rem;
-        padding-bottom: 3rem;
-      }
-      /* Status indicator animation */
-      .wow-status-dot.running {
-        animation: pulse 1s infinite;
-      }
-      @keyframes pulse {
-        0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(250,204,21,0.7); }
-        70% { transform: scale(1.25); box-shadow: 0 0 0 8px rgba(250,204,21,0); }
-        100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(250,204,21,0); }
-      }
-      .wow-dashboard-metric {
-        border-radius: 16px;
-        padding: 0.8rem 1.2rem;
-        background: rgba(15,23,42,0.4);
-        backdrop-filter: blur(12px);
-      }
-      .wow-section-header {
-        padding: 0.4rem 0.8rem;
-        border-radius: 999px;
-        display: inline-flex;
-        align-items: center;
-        gap: 0.4rem;
-        font-size: 0.82rem;
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-      }
-      .wow-section-header-dot {
-        width: 8px;
-        height: 8px;
-        border-radius: 999px;
-        background: #22c55e;
-      }
-    """
-
     if theme == "Dark":
-        base_css += """
-          body {
-            color: #e5e7eb;
-          }
-          .stApp {
-            color: #e5e7eb;
-          }
-          .stButton>button {
-            background-image: linear-gradient(135deg, #22c55e, #0ea5e9);
-            color: white;
-            border-radius: 999px;
-            border: none;
-          }
-          .stButton>button:hover {
-            filter: brightness(1.05);
-          }
-          .stTextInput>div>div>input,
-          .stTextArea textarea {
-            background-color: rgba(15,23,42,0.9);
-            color: #f9fafb;
-            border-radius: 0.75rem;
-          }
-          .stSelectbox>div>div>div>div {
-            background-color: rgba(15,23,42,0.9);
-            color: #f9fafb;
-            border-radius: 0.75rem;
-          }
+        css += """
+        body { color: #e0e0e0; }
+        .stButton>button {
+            background-color: #1f2933; color: white; border-radius: 999px;
+        }
+        .stTextInput>div>div>input, .stTextArea textarea, .stSelectbox>div>div {
+            background-color: #111827; color: #e5e7eb; border-radius: 0.5rem;
+        }
         """
     else:
-        base_css += """
-          body {
-            color: #111827;
-          }
-          .stApp {
-            color: #111827;
-          }
-          .stButton>button {
-            background-image: linear-gradient(135deg, #2563eb, #22c55e);
-            color: white;
-            border-radius: 999px;
-            border: none;
-          }
-          .stButton>button:hover {
-            filter: brightness(1.05);
-          }
-          .stTextInput>div>div>input,
-          .stTextArea textarea {
-            background-color: #ffffff;
-            color: #111827;
-            border-radius: 0.75rem;
-          }
-          .stSelectbox>div>div>div>div {
-            background-color: #ffffff;
-            color: #111827;
-            border-radius: 0.75rem;
-          }
+        css += """
+        body { color: #111827; }
+        .stButton>button {
+            background-color: #2563eb; color: white; border-radius: 999px;
+        }
+        .stTextInput>div>div>input, .stTextArea textarea, .stSelectbox>div>div {
+            background-color: #ffffff; color: #111827; border-radius: 0.5rem;
+        }
         """
-
-    css += base_css
     st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
 
+# =========================
+# LLM routing
+# =========================
 
 def get_provider(model: str) -> str:
     if model in OPENAI_MODELS:
@@ -426,7 +159,6 @@ def call_llm(
     temperature: float = 0.2,
     api_keys: dict | None = None,
 ) -> str:
-    """Synchronous LLM call with routing across OpenAI, Gemini, Anthropic, Grok."""
     provider = get_provider(model)
     api_keys = api_keys or {}
 
@@ -500,21 +232,24 @@ def call_llm(
             data = resp.json()
         return data["choices"][0]["message"]["content"]
 
+    raise RuntimeError(f"Unsupported provider for model {model}")
+
+# =========================
+# Generic helpers
+# =========================
 
 def show_status(step_name: str, status: str):
-    """Small colored WOW indicator with subtle animation when running."""
     color = {
         "pending": "gray",
         "running": "#f59e0b",
         "done": "#10b981",
         "error": "#ef4444",
     }.get(status, "gray")
-    running_class = "running" if status == "running" else ""
     st.markdown(
         f"""
         <div style="display:flex;align-items:center;margin-bottom:0.25rem;">
-          <div class="wow-status-dot {running_class}"
-               style="width:10px;height:10px;border-radius:50%;background:{color};margin-right:6px;"></div>
+          <div style="width:10px;height:10px;border-radius:50%;background:{color};
+                      margin-right:6px;"></div>
           <span style="font-size:0.9rem;">{step_name} – <b>{status}</b></span>
         </div>
         """,
@@ -535,7 +270,6 @@ def log_event(tab: str, agent: str, model: str, tokens_est: int):
 
 
 def extract_pdf_pages_to_text(file, start_page: int, end_page: int) -> str:
-    """Extract text from a PDF between start_page and end_page (1-based, inclusive)."""
     reader = PdfReader(file)
     n = len(reader.pages)
     start = max(0, start_page - 1)
@@ -550,7 +284,6 @@ def extract_pdf_pages_to_text(file, start_page: int, end_page: int) -> str:
 
 
 def extract_docx_to_text(file) -> str:
-    """Extract text from a DOCX file (if python-docx is installed)."""
     if Document is None:
         return ""
     try:
@@ -561,6 +294,43 @@ def extract_docx_to_text(file) -> str:
         return ""
 
 
+def create_pdf_from_text(text: str) -> bytes:
+    if canvas is None or letter is None:
+        raise RuntimeError(
+            "PDF generation library 'reportlab' is not installed. "
+            "Please add 'reportlab' to requirements.txt."
+        )
+    buf = BytesIO()
+    c = canvas.Canvas(buf, pagesize=letter)
+    width, height = letter
+    margin = 72
+    line_height = 14
+    y = height - margin
+    for line in text.splitlines():
+        if y < margin:
+            c.showPage()
+            y = height - margin
+        c.drawString(margin, y, line[:2000])
+        y -= line_height
+    c.save()
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def show_pdf(pdf_bytes: bytes, height: int = 600):
+    if not pdf_bytes:
+        return
+    b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+    pdf_html = f"""
+    <iframe src="data:application/pdf;base64,{b64}"
+            width="100%" height="{height}" type="application/pdf"></iframe>
+    """
+    st.markdown(pdf_html, unsafe_allow_html=True)
+
+# =========================
+# Agent UI runner
+# =========================
+
 def agent_run_ui(
     agent_id: str,
     tab_key: str,
@@ -569,24 +339,28 @@ def agent_run_ui(
     allow_model_override: bool = True,
     tab_label_for_history: str | None = None,
 ):
-    """Reusable UI for running any agent defined in agents.yaml."""
-    agents_cfg = st.session_state["agents_cfg"]
-    agent_cfg = agents_cfg["agents"][agent_id]
+    agents_cfg = st.session_state.get("agents_cfg", {})
+    agents_dict = agents_cfg.get("agents", {})
+
+    # 找到 agent 設定，若不存在則給一個 fallback
+    if agent_id in agents_dict:
+        agent_cfg = agents_dict[agent_id]
+    else:
+        agent_cfg = {
+            "name": agent_id,
+            "model": st.session_state.settings["model"],
+            "system_prompt": "",
+            "max_tokens": st.session_state.settings["max_tokens"],
+        }
+
     status_key = f"{tab_key}_status"
     if status_key not in st.session_state:
         st.session_state[status_key] = "pending"
 
     show_status(agent_cfg.get("name", agent_id), st.session_state[status_key])
 
-    col1, col2, col3 = st.columns([2.2, 1.1, 0.9])
+    col1, col2, col3 = st.columns([2, 1, 1])
     with col1:
-        st.markdown(
-            '<div class="wow-section-header">'
-            '<div class="wow-section-header-dot"></div>'
-            '<span>Prompt & Instructions</span>'
-            "</div>",
-            unsafe_allow_html=True,
-        )
         user_prompt = st.text_area(
             "Prompt",
             value=st.session_state.get(f"{tab_key}_prompt", default_prompt),
@@ -608,7 +382,7 @@ def agent_run_ui(
             "max_tokens",
             min_value=1000,
             max_value=120000,
-            value=st.session_state.settings["max_tokens"],
+            value=int(agent_cfg.get("max_tokens", st.session_state.settings["max_tokens"])),
             step=1000,
             key=f"{tab_key}_max_tokens",
         )
@@ -652,10 +426,10 @@ def agent_run_ui(
                 st.session_state[status_key] = "error"
                 st.error(f"Agent error: {e}")
 
-    # Editable output (used for chaining)
     output = st.session_state.get(f"{tab_key}_output", "")
     view_mode = st.radio(
-        "View mode", ["Markdown", "Plain text"], horizontal=True, key=f"{tab_key}_viewmode"
+        "View mode", ["Markdown", "Plain text"],
+        horizontal=True, key=f"{tab_key}_viewmode",
     )
     if view_mode == "Markdown":
         edited = st.text_area(
@@ -674,9 +448,8 @@ def agent_run_ui(
 
     st.session_state[f"{tab_key}_output_edited"] = edited
 
-
 # =========================
-# Sidebar (WOW UI + API)
+# Sidebar
 # =========================
 
 def render_sidebar():
@@ -685,15 +458,13 @@ def render_sidebar():
 
         # Theme
         st.session_state.settings["theme"] = st.radio(
-            "Theme",
-            ["Light", "Dark"],
+            "Theme", ["Light", "Dark"],
             index=0 if st.session_state.settings["theme"] == "Light" else 1,
         )
 
         # Language
         st.session_state.settings["language"] = st.radio(
-            "Language",
-            ["English", "繁體中文"],
+            "Language", ["English", "繁體中文"],
             index=0 if st.session_state.settings["language"] == "English" else 1,
         )
 
@@ -708,7 +479,6 @@ def render_sidebar():
         with col2:
             if st.button("Jackpot!"):
                 import random
-
                 style = random.choice(PAINTER_STYLES)
         st.session_state.settings["painter_style"] = style
 
@@ -733,11 +503,10 @@ def render_sidebar():
             0.05,
         )
 
-        # API Keys (hidden if from env)
         st.markdown("---")
         st.markdown("### API Keys")
 
-        keys: dict[str, str] = {}
+        keys = {}
 
         if os.getenv("OPENAI_API_KEY"):
             keys["openai"] = os.getenv("OPENAI_API_KEY")
@@ -765,11 +534,12 @@ def render_sidebar():
 
         st.session_state["api_keys"] = keys
 
-        # Optional override of agents.yaml
         st.markdown("---")
         st.markdown("### Agents Catalog (agents.yaml)")
         uploaded_agents = st.file_uploader(
-            "Upload custom agents.yaml", type=["yaml", "yml"]
+            "Upload custom agents.yaml",
+            type=["yaml", "yml"],
+            key="sidebar_agents_yaml",
         )
         if uploaded_agents is not None:
             try:
@@ -778,27 +548,12 @@ def render_sidebar():
                     st.session_state["agents_cfg"] = cfg
                     st.success("Custom agents.yaml loaded for this session.")
                 else:
-                    st.warning(
-                        "Uploaded YAML has no top-level 'agents' key. Using default config."
-                    )
+                    st.warning("Uploaded YAML has no top-level 'agents' key. Using previous config.")
             except Exception as e:
                 st.error(f"Failed to parse uploaded YAML: {e}")
 
-        # SKILL.md quick help
-        skill_md = load_skill_md()
-        if skill_md:
-            st.markdown("---")
-            st.markdown("### SKILL.md Snapshot")
-            st.caption("High-level system skills and capabilities.")
-            # Show only first ~1000 characters to avoid an overly long sidebar
-            preview = skill_md[:1000]
-            if len(skill_md) > 1000:
-                preview += "\n\n… *(truncated – see full content in SKILL tab)*"
-            st.markdown(preview)
-
-
 # =========================
-# Tab renderers
+# Tabs
 # =========================
 
 def render_dashboard():
@@ -812,75 +567,531 @@ def render_dashboard():
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        with st.container():
-            st.markdown('<div class="wow-dashboard-metric">', unsafe_allow_html=True)
-            st.metric("Total Runs", len(df))
-            st.markdown("</div>", unsafe_allow_html=True)
+        st.metric("Total Runs", len(df))
     with col2:
-        with st.container():
-            st.markdown('<div class="wow-dashboard-metric">', unsafe_allow_html=True)
-            st.metric(
-                "Unique 510(k) Sessions",
-                df[df["tab"].str.contains("510", na=False)].shape[0],
-            )
-            st.markdown("</div>", unsafe_allow_html=True)
+        st.metric("Unique Tabs", df["tab"].nunique())
     with col3:
-        with st.container():
-            st.markdown('<div class="wow-dashboard-metric">', unsafe_allow_html=True)
-            st.metric("Approx Tokens Processed", int(df["tokens_est"].sum()))
-            st.markdown("</div>", unsafe_allow_html=True)
+        st.metric("Approx Tokens Processed", int(df["tokens_est"].sum()))
 
     st.subheader("Runs by Tab")
-    chart_tab = (
-        alt.Chart(df)
-        .mark_bar()
-        .encode(
-            x=alt.X("tab:N", sort="-y", title="Tab"),
-            y=alt.Y("count():Q", title="Runs"),
-            color="tab:N",
-            tooltip=["tab", "count()"],
-        )
+    chart_tab = alt.Chart(df).mark_bar().encode(
+        x="tab:N",
+        y="count():Q",
+        color="tab:N",
+        tooltip=["tab", "count()"],
     )
     st.altair_chart(chart_tab, use_container_width=True)
 
     st.subheader("Runs by Model")
-    chart_model = (
-        alt.Chart(df)
-        .mark_bar()
-        .encode(
-            x=alt.X("model:N", sort="-y", title="Model"),
-            y=alt.Y("count():Q", title="Runs"),
-            color="model:N",
-            tooltip=["model", "count()"],
-        )
+    chart_model = alt.Chart(df).mark_bar().encode(
+        x="model:N",
+        y="count():Q",
+        color="model:N",
+        tooltip=["model", "count()"],
     )
     st.altair_chart(chart_model, use_container_width=True)
 
     st.subheader("Token Usage Over Time")
     df_time = df.copy()
     df_time["ts"] = pd.to_datetime(df_time["ts"])
-    chart_time = (
-        alt.Chart(df_time)
-        .mark_line(point=True)
-        .encode(
-            x="ts:T",
-            y=alt.Y("tokens_est:Q", title="Approx Tokens"),
-            color="tab:N",
-            tooltip=["ts", "tab", "agent", "model", "tokens_est"],
-        )
+    chart_time = alt.Chart(df_time).mark_line(point=True).encode(
+        x="ts:T",
+        y="tokens_est:Q",
+        color="tab:N",
+        tooltip=["ts", "tab", "agent", "model", "tokens_est"],
     )
     st.altair_chart(chart_time, use_container_width=True)
 
     st.subheader("Recent Activity")
-    st.dataframe(
-        df.sort_values("ts", ascending=False).head(25),
-        use_container_width=True,
+    st.dataframe(df.sort_values("ts", ascending=False).head(25), use_container_width=True)
+
+# -------------------------
+# TW Premarket Tab
+# -------------------------
+
+def render_tw_premarket_tab():
+    """臺灣第二、三等級醫療器材查驗登記 – 預審/形式審查 Tab"""
+    st.title(t("TW Premarket"))
+
+    st.markdown(
+        """
+        <div style="background:#eef2ff;border-radius:12px;padding:10px 14px;
+                    border:1px solid #c7d2fe;margin-bottom:0.75rem;">
+          <b>Step 1.</b> 線上填寫「第二、三等級醫療器材查驗登記申請」主要欄位（草稿）。<br>
+          <b>Step 2.</b> 貼上或上傳「預審/形式審查指引」供 AI 進行完整性檢核。<br>
+          <b>Step 3.</b> 產出預審摘要報告 (Markdown)，可在頁面上修改。<br>
+          <b>Step 4.</b> 以 AI 協助編修申請書內容，或把輸出串接到下一個 agent。
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
+    # -----------------------------
+    # Step 1 – 線上申請書草稿
+    # -----------------------------
+    st.markdown("### Step 1 – 線上填寫申請書（草稿）")
+
+    if "tw_app_status" not in st.session_state:
+        st.session_state["tw_app_status"] = "pending"
+    show_status("申請書填寫", st.session_state["tw_app_status"])
+
+    # 一、案件基本資料
+    st.markdown("#### 一、案件基本資料")
+    col_a1, col_a2, col_a3 = st.columns(3)
+    with col_a1:
+        doc_no = st.text_input("公文文號", key="tw_doc_no")
+        e_no = st.text_input("電子流水號", value="MDE", key="tw_e_no")
+    with col_a2:
+        apply_date = st.date_input("申請日", key="tw_apply_date")
+        case_type = st.selectbox(
+            "案件類型*",
+            ["一般申請案", "同一產品不同品名", "專供外銷", "許可證有效期限屆至後六個月內重新申請"],
+            key="tw_case_type",
+        )
+    with col_a3:
+        device_category = st.selectbox(
+            "醫療器材類型*",
+            ["一般醫材", "體外診斷器材(IVD)"],
+            key="tw_device_category",
+        )
+        case_kind = st.selectbox("案件種類*", ["新案", "變更案", "展延案"], index=0, key="tw_case_kind")
+
+    col_a4, col_a5, col_a6 = st.columns(3)
+    with col_a4:
+        origin = st.selectbox("產地*", ["國產", "輸入", "陸輸"], key="tw_origin")
+    with col_a5:
+        product_class = st.selectbox("產品等級*", ["第二等級", "第三等級"], key="tw_product_class")
+    with col_a6:
+        similar = st.selectbox("有無類似品*", ["有", "無", "全球首創"], key="tw_similar")
+
+    col_a7, col_a8 = st.columns(2)
+    with col_a7:
+        replace_flag = st.radio(
+            "是否勾選「替代臨床前測試及原廠品質管制資料」？*",
+            ["否", "是"],
+            index=0,
+            key="tw_replace_flag",
+        )
+    with col_a8:
+        prior_app_no = st.text_input("（非首次申請）前次申請案號", key="tw_prior_app_no")
+
+    # 二、醫療器材基本資訊
+    st.markdown("#### 二、醫療器材基本資訊")
+    col_b1, col_b2 = st.columns(2)
+    with col_b1:
+        name_zh = st.text_input("醫療器材中文名稱*", key="tw_dev_name_zh")
+        name_en = st.text_input("醫療器材英文名稱*", key="tw_dev_name_en")
+    with col_b2:
+        indications = st.text_area("效能、用途或適應症說明", value="詳如核定之中文說明書", key="tw_indications")
+        spec_comp = st.text_area("型號、規格或主要成分說明", value="詳如核定之中文說明書", key="tw_spec_comp")
+
+    st.markdown("**分類分級品項（依《醫療器材分類分級管理辦法》附表填列）**")
+    col_b3, col_b4, col_b5 = st.columns(3)
+    with col_b3:
+        main_cat = st.selectbox(
+            "主類別",
+            [
+                "",
+                "A.臨床化學及臨床毒理學",
+                "B.血液學及病理學",
+                "C.免疫學及微生物學",
+                "D.麻醉學",
+                "E.心臟血管醫學",
+                "F.牙科學",
+                "G.耳鼻喉科學",
+                "H.胃腸病科學及泌尿科學",
+                "I.一般及整形外科手術",
+                "J.一般醫院及個人使用裝置",
+                "K.神經科學",
+                "L.婦產科學",
+                "M.眼科學",
+                "N.骨科學",
+                "O.物理醫學科學",
+                "P.放射學科學",
+            ],
+            key="tw_main_cat",
+        )
+    with col_b4:
+        item_code = st.text_input("分級品項代碼（例：A.1225）", key="tw_item_code")
+    with col_b5:
+        item_name = st.text_input("分級品項名稱（例：肌氨酸酐試驗系統）", key="tw_item_name")
+
+    # 三、醫療器材商資料
+    st.markdown("#### 三、醫療器材商資料")
+    col_c1, col_c2 = st.columns(2)
+    with col_c1:
+        uniform_id = st.text_input("統一編號*", key="tw_uniform_id")
+        firm_name = st.text_input("醫療器材商名稱*", key="tw_firm_name")
+        firm_addr = st.text_area("醫療器材商地址*", height=80, key="tw_firm_addr")
+    with col_c2:
+        resp_name = st.text_input("負責人姓名*", key="tw_resp_name")
+        contact_name = st.text_input("聯絡人姓名*", key="tw_contact_name")
+        contact_tel = st.text_input("電話*", key="tw_contact_tel")
+        contact_fax = st.text_input("聯絡人傳真", key="tw_contact_fax")
+        contact_email = st.text_input("電子郵件*", key="tw_contact_email")
+
+    confirm_match = st.checkbox(
+        "我已確認上述資料與最新版醫療器材商證照資訊(名稱、地址、負責人)相符",
+        key="tw_confirm_match",
+    )
+
+    st.markdown("**其它佐證（承辦人訓練證明等）**")
+    col_c3, col_c4 = st.columns(2)
+    with col_c3:
+        cert_raps = st.checkbox("RAPS", key="tw_cert_raps")
+        cert_ahwp = st.checkbox("AHWP", key="tw_cert_ahwp")
+    with col_c4:
+        cert_other = st.text_input("其它，請敘明", key="tw_cert_other")
+
+    # 四、製造廠資訊
+    st.markdown("#### 四、製造廠資訊（含委託製造）")
+    manu_type = st.radio(
+        "製造方式",
+        ["單一製造廠", "全部製程委託製造", "委託非全部製程之製造/包裝/貼標/滅菌及最終驗放"],
+        index=0,
+        key="tw_manu_type",
+    )
+    col_d1, col_d2 = st.columns(2)
+    with col_d1:
+        manu_name = st.text_input("製造廠名稱*", key="tw_manu_name")
+        manu_country = st.selectbox(
+            "製造國別*",
+            [
+                "TAIWAN， ROC",
+                "UNITED STATES",
+                "EU (Member State)",
+                "JAPAN",
+                "CHINA",
+                "KOREA， REPUBLIC OF",
+                "OTHER",
+            ],
+            key="tw_manu_country",
+        )
+    with col_d2:
+        manu_addr = st.text_area("製造廠地址*", height=80, key="tw_manu_addr")
+        manu_note = st.text_area("製造廠相關說明（如(O)/(P)製造、委託範圍）", height=80, key="tw_manu_note")
+
+    # 簡化版附件摘要欄
+    with st.expander("附件摘要：原廠授權、出產國製售證明、QMS/QSD、技術檔案、臨床資料等", expanded=False):
+        auth_applicable = st.selectbox("原廠授權登記書", ["不適用", "適用"], key="tw_auth_app")
+        auth_desc = st.text_area("原廠授權登記書資料說明", height=80, key="tw_auth_desc")
+
+        cfs_applicable = st.selectbox("出產國製售證明", ["不適用", "適用"], key="tw_cfs_app")
+        cfs_desc = st.text_area("出產國製售證明資料說明", height=80, key="tw_cfs_desc")
+
+        qms_applicable = st.selectbox("QMS/QSD", ["不適用", "適用"], key="tw_qms_app")
+        qms_desc = st.text_area("QMS/QSD 資料說明（含案號、登錄狀態）", height=80, key="tw_qms_desc")
+
+        similar_info = st.text_area(
+            "類似品與比較表摘要（如無類似品則說明理由）",
+            height=80,
+            key="tw_similar_info",
+        )
+        labeling_info = st.text_area(
+            "標籤、說明書或包裝擬稿重點",
+            height=100,
+            key="tw_labeling_info",
+        )
+        tech_file_info = st.text_area(
+            "產品結構、材料、規格、性能、用途、圖樣等技術檔案摘要",
+            height=120,
+            key="tw_tech_file_info",
+        )
+        preclinical_info = st.text_area(
+            "臨床前測試 & 原廠品質管制檢驗摘要（生物相容性、電氣安全、EMC、滅菌、安定性、功能測試、軟體確效等）",
+            height=140,
+            key="tw_preclinical_info",
+        )
+        preclinical_replace = st.text_area(
+            "如本案適用「替代臨床前測試及原廠品質管制資料」之說明",
+            height=100,
+            key="tw_preclinical_replace",
+        )
+        clinical_just = st.selectbox("臨床證據是否適用？", ["不適用", "適用"], key="tw_clinical_app")
+        clinical_info = st.text_area(
+            "臨床證據摘要（研究報告、臨床評估、臨床試驗、FDA/歐盟核定資料等）",
+            height=140,
+            key="tw_clinical_info",
+        )
+
+    # 產生申請書 Markdown
+    if st.button("生成申請書 Markdown 草稿", key="tw_generate_md_btn"):
+        missing = []
+        if not e_no.strip():
+            missing.append("電子流水號")
+        if not case_type.strip():
+            missing.append("案件類型")
+        if not device_category.strip():
+            missing.append("醫療器材類型")
+        if not origin.strip():
+            missing.append("產地")
+        if not product_class.strip():
+            missing.append("產品等級")
+        if not name_zh.strip():
+            missing.append("醫療器材中文名稱")
+        if not name_en.strip():
+            missing.append("醫療器材英文名稱")
+        if not uniform_id.strip():
+            missing.append("統一編號")
+        if not firm_name.strip():
+            missing.append("醫療器材商名稱")
+        if not firm_addr.strip():
+            missing.append("醫療器材商地址")
+        if not resp_name.strip():
+            missing.append("負責人姓名")
+        if not contact_name.strip():
+            missing.append("聯絡人姓名")
+        if not contact_tel.strip():
+            missing.append("電話")
+        if not contact_email.strip():
+            missing.append("電子郵件")
+        if not manu_name.strip():
+            missing.append("製造廠名稱")
+        if not manu_addr.strip():
+            missing.append("製造廠地址")
+
+        if missing:
+            st.warning("以下基本欄位尚未填寫完整（形式檢查）：\n- " + "\n- ".join(missing))
+            st.session_state["tw_app_status"] = "error"
+        else:
+            st.session_state["tw_app_status"] = "done"
+
+        apply_date_str = apply_date.strftime("%Y-%m-%d") if apply_date else ""
+
+        app_md = f"""# 第二、三等級醫療器材查驗登記申請書（線上草稿）
+
+## 一、案件基本資料
+- 公文文號：{doc_no or "（未填）"}
+- 電子流水號：{e_no or "（未填）"}
+- 申請日：{apply_date_str or "（未填）"}
+- 案件類型：{case_type}
+- 醫療器材類型：{device_category}
+- 案件種類：{case_kind}
+- 產地：{origin}
+- 產品等級：{product_class}
+- 有無類似品：{similar}
+- 是否勾選「替代臨床前測試及原廠品質管制資料」：{replace_flag}
+- 前次申請案號（如適用）：{prior_app_no or "不適用"}
+
+## 二、醫療器材基本資訊
+- 中文名稱：{name_zh}
+- 英文名稱：{name_en}
+- 效能、用途或適應症說明：{indications}
+- 型號、規格或主要成分：{spec_comp}
+
+### 分類分級品項
+- 主類別：{main_cat or "（未填）"}
+- 分級品項代碼：{item_code or "（未填）"}
+- 分級品項名稱：{item_name or "（未填）"}
+
+## 三、醫療器材商資料
+- 統一編號：{uniform_id}
+- 醫療器材商名稱：{firm_name}
+- 地址：{firm_addr}
+- 負責人姓名：{resp_name}
+- 聯絡人姓名：{contact_name}
+- 電話：{contact_tel}
+- 傳真：{contact_fax or "（未填）"}
+- 電子郵件：{contact_email}
+- 已確認與最新醫療器材商證照資訊相符：{"是" if confirm_match else "否"}
+
+### 其它佐證
+- RAPS：{"有" if cert_raps else "無"}
+- AHWP：{"有" if cert_ahwp else "無"}
+- 其它訓練/證書：{cert_other or "無"}
+
+## 四、製造廠資訊
+- 製造方式：{manu_type}
+- 製造廠名稱：{manu_name}
+- 製造國別：{manu_country}
+- 製造廠地址：{manu_addr}
+- 製造相關說明：{manu_note or "（未填）"}
+
+## 五～七、原廠授權、出產國製售證明、QMS/QSD
+- 原廠授權登記書適用性：{auth_applicable}
+- 原廠授權登記書資料說明：{auth_desc or "（未填）"}
+- 出產國製售證明適用性：{cfs_applicable}
+- 出產國製售證明資料說明：{cfs_desc or "（未填）"}
+- QMS/QSD 適用性：{qms_applicable}
+- QMS/QSD 資料說明：{qms_desc or "（未填）"}
+
+## 十～十二、類似品、標籤/說明書擬稿、產品技術檔案摘要
+### 類似品相關資訊
+{similar_info or "（未填）"}
+
+### 標籤／說明書／包裝擬稿重點
+{labeling_info or "（未填）"}
+
+### 產品結構、材料、規格、性能、用途、圖樣等技術檔案摘要
+{tech_file_info or "（未填）"}
+
+## 十三～十七、特定安全性要求與臨床前測試及品質管制資料
+### 臨床前測試與原廠品質管制資料摘要
+{preclinical_info or "（未填）"}
+
+### 替代「臨床前測試及原廠品質管制資料」之說明
+{preclinical_replace or "（未填）"}
+
+## 十八、臨床證據資料
+- 臨床證據適用性：{clinical_just}
+- 臨床證據摘要：
+{clinical_info or "（未填）"}
+"""
+        st.session_state["tw_app_markdown"] = app_md
+
+    st.markdown("##### 申請書 Markdown（可編輯）")
+    app_md_current = st.session_state.get("tw_app_markdown", "")
+    app_view_mode = st.radio(
+        "申請書檢視模式", ["Markdown", "純文字"],
+        horizontal=True, key="tw_app_viewmode",
+    )
+    if app_view_mode == "Markdown":
+        app_md_edited = st.text_area(
+            "申請書內容",
+            value=app_md_current,
+            height=320,
+            key="tw_app_md_edited",
+        )
+    else:
+        app_md_edited = st.text_area(
+            "申請書內容（純文字）",
+            value=app_md_current,
+            height=320,
+            key="tw_app_txt_edited",
+        )
+    st.session_state["tw_app_effective_md"] = app_md_edited
+
+    st.markdown("---")
+
+    # -----------------------------
+    # Step 2 – 預審指引
+    # -----------------------------
+    st.markdown("### Step 2 – 輸入預審/形式審查指引（Screen Review Guidance）")
+
+    col_g1, col_g2 = st.columns(2)
+    with col_g1:
+        guidance_file = st.file_uploader(
+            "上傳預審指引 (PDF / TXT / MD)",
+            type=["pdf", "txt", "md"],
+            key="tw_guidance_file",
+        )
+        guidance_text_from_file = ""
+        if guidance_file is not None:
+            suffix = guidance_file.name.lower().rsplit(".", 1)[-1]
+            if suffix == "pdf":
+                guidance_text_from_file = extract_pdf_pages_to_text(guidance_file, 1, 9999)
+            else:
+                guidance_text_from_file = guidance_file.read().decode("utf-8", errors="ignore")
+    with col_g2:
+        guidance_text_manual = st.text_area(
+            "或直接貼上預審/形式審查指引文字或 Markdown",
+            height=200,
+            key="tw_guidance_manual",
+        )
+
+    guidance_text = guidance_text_from_file or guidance_text_manual
+    st.session_state["tw_guidance_text"] = guidance_text
+
+    if guidance_text:
+        st.success("已載入預審/形式審查指引文字。")
+    else:
+        st.info("尚未提供預審指引。可先填寫申請書草稿，稍後再補。")
+
+    st.markdown("---")
+
+    # -----------------------------
+    # Step 3 – 形式審查 / 完整性檢核
+    # -----------------------------
+    st.markdown("### Step 3 – 形式審查 / 完整性檢核（Agent）")
+
+    if "tw_app_effective_md" not in st.session_state or not st.session_state["tw_app_effective_md"].strip():
+        st.warning("尚未產生申請書 Markdown。請先於 Step 1 填寫並點擊「生成申請書 Markdown 草稿」。")
+        return
+
+    base_app_md = st.session_state.get("tw_app_effective_md", "")
+    base_guidance = st.session_state.get("tw_guidance_text", "")
+
+    combined_input = f"""=== 申請書草稿（Markdown） ===
+{base_app_md}
+
+=== 預審 / 形式審查指引（文字/Markdown） ===
+{base_guidance or "（尚未提供指引，請依一般法規常規進行形式檢核）"}
+"""
+
+    default_screen_prompt = """你是一位熟悉臺灣「第二、三等級醫療器材查驗登記」的形式審查(預審)審查員。
+
+請根據：
+1. 上述「申請書草稿（Markdown）」內容
+2. 上述「預審 / 形式審查指引」(如有)
+
+執行下列任務，並以 **繁體中文 Markdown** 輸出預審報告：
+
+1. 形式完整性檢核
+   - 建立一個表格，逐一列出本案應檢附的主要文件類別（例如：申請書、醫療器材商許可執照、原廠授權登記書、出產國製售證明、QMS/QSD、標籤/說明書擬稿、產品技術檔案、臨床前測試資料、臨床證據資料等）。
+   - 對每一項，標示：
+     - 「預期應附？」（是/否/不明）
+     - 「申請書中是否有提及？」（有/疑似有/未見）
+     - 「整體判定」（足夠/可能不足/明顯缺漏）
+     - 「備註說明」（請具體指出缺漏內容或需補充重點）。
+
+2. 重要欄位檢核
+   - 針對案件基本資料（案件類型、產地、產品等級、有無類似品、替代條款勾選與否）、醫療器材名稱與分類分級品項、醫療器材商與製造廠資訊等，檢查是否有明顯未填或矛盾之處。
+   - 若有，請以條列方式說明「問題項目」、「疑慮說明」、「建議申請人補充之資料」。
+
+3. 預審評語摘要
+   - 撰寫一段約 300–600 字的預審評語摘要，說明：
+     - 本案送件資料整體完整性評估（例如：資料大致齊全 / 某些關鍵附件可能不足 / 明顯缺少核心技術與臨床資料…）。
+     - 建議申請人下一步應補充或澄清之項目（可分成「必須補件」與「建議補充」）。
+
+4. 請盡量避免臆測未提及之資料；若無從判斷，請明確註記「依現有輸入無法判斷」。
+"""
+
+    st.info(
+        "此處預設使用 agents.yaml 中的 `tw_screen_review_agent`。"
+        "若 agents.yaml 中尚未定義，可先用 fallback system_prompt（即上方 Prompt 文字）。"
+    )
+
+    agent_run_ui(
+        agent_id="tw_screen_review_agent",
+        tab_key="tw_screen",
+        default_prompt=default_screen_prompt,
+        default_input_text=combined_input,
+        allow_model_override=True,
+        tab_label_for_history="TW Premarket Screen Review",
+    )
+
+    st.markdown("---")
+
+    # -----------------------------
+    # Step 4 – AI 協助編修申請書內容
+    # -----------------------------
+    st.markdown("### Step 4 – AI 協助編修申請書內容")
+
+    helper_default_prompt = """你是一位協助臺灣醫療器材查驗登記申請人的文件撰寫助手。
+
+請在 **不改變實際技術與法規內容** 的前提下，針對以下「申請書草稿（Markdown）」：
+
+1. 優化段落結構與標題層級，使其更符合主管機關常見文件格式。
+2. 修正文句中的明顯語病或不通順處，但不得自行新增未出現在原文的重要技術/臨床資訊。
+3. 如有明顯資訊不足之處，可以在文件中以「※待補：...」標註提醒，供申請人後續補充。
+4. 保持輸出為 Markdown。
+"""
+
+    agent_run_ui(
+        agent_id="tw_app_doc_helper",
+        tab_key="tw_app_helper",
+        default_prompt=helper_default_prompt,
+        default_input_text=st.session_state.get("tw_app_effective_md", ""),
+        allow_model_override=True,
+        tab_label_for_history="TW Application Doc Helper",
+    )
+
+# -------------------------
+# 510(k) Intelligence (簡化)
+# -------------------------
 
 def render_510k_tab():
     st.title(t("510k_tab"))
-
     col1, col2 = st.columns(2)
     with col1:
         device_name = st.text_input("Device Name")
@@ -888,29 +1099,21 @@ def render_510k_tab():
     with col2:
         sponsor = st.text_input("Sponsor / Manufacturer (optional)")
         product_code = st.text_input("Product Code (optional)")
-
     extra_info = st.text_area("Additional context (indications, technology, etc.)")
 
     default_prompt = f"""
 You are assisting an FDA 510(k) reviewer.
 
 Task:
-1. Search FDA resources (or emulate such search) for:
+1. Summarize the publicly available information (or emulate such) for:
    - Device: {device_name}
    - 510(k) number: {k_number}
    - Sponsor: {sponsor}
    - Product code: {product_code}
-2. Synthesize a 3000–4000 word detailed, review-oriented summary.
-3. Provide AT LEAST 5 well-structured markdown tables covering at minimum:
-   - Device overview (trade name, sponsor, 510(k) number, product code, regulation number)
-   - Indications for use and intended population
-   - Technological characteristics and comparison with predicate(s)
-   - Performance testing (bench, animal, clinical) and acceptance criteria
-   - Risks and corresponding risk controls/mitigations
+2. Produce a detailed, review-oriented summary (about 2000–3000 words).
+3. Provide several markdown tables (e.g., device overview, indications, performance testing, risks).
 
 Language: {st.session_state.settings["language"]}.
-
-Use headings that match FDA 510(k) review style.
 """
     combined_input = f"""
 === Device Inputs ===
@@ -922,28 +1125,34 @@ Product code: {product_code}
 Additional context:
 {extra_info}
 """
-
     agent_run_ui(
-        agent_id="fda_search_agent",
+        agent_id="fda_510k_intel_agent",
         tab_key="510k",
         default_prompt=default_prompt,
         default_input_text=combined_input,
         tab_label_for_history="510(k) Intelligence",
     )
 
+# -------------------------
+# PDF → Markdown (簡化)
+# -------------------------
 
 def render_pdf_to_md_tab():
-    st.title("PDF → Markdown Transformer")
+    st.title(t("PDF → Markdown"))
 
-    uploaded = st.file_uploader("Upload 510(k) or related PDF", type=["pdf"])
+    uploaded = st.file_uploader(
+        "Upload PDF to convert selected pages to Markdown",
+        type=["pdf"],
+        key="pdf_to_md_uploader",
+    )
     if uploaded:
         col1, col2 = st.columns(2)
         with col1:
-            num_start = st.number_input("From page", min_value=1, value=1)
+            num_start = st.number_input("From page", min_value=1, value=1, key="pdf_to_md_from")
         with col2:
-            num_end = st.number_input("To page", min_value=1, value=10)
+            num_end = st.number_input("To page", min_value=1, value=5, key="pdf_to_md_to")
 
-        if st.button("Extract Pages"):
+        if st.button("Extract Text", key="pdf_to_md_extract_btn"):
             text = extract_pdf_pages_to_text(uploaded, int(num_start), int(num_end))
             st.session_state["pdf_raw_text"] = text
 
@@ -952,11 +1161,9 @@ def render_pdf_to_md_tab():
         default_prompt = f"""
 You are converting part of a regulatory PDF into markdown.
 
-- Input pages: a 510(k) submission, guidance, or related document excerpt.
 - Goal: produce clean, structured markdown preserving headings, lists,
   and tables (as markdown tables) as much as reasonably possible.
 - Do not hallucinate content that is not in the text.
-- Clearly separate sections corresponding to major headings.
 
 Language: {st.session_state.settings["language"]}.
 """
@@ -968,998 +1175,583 @@ Language: {st.session_state.settings["language"]}.
             tab_label_for_history="PDF → Markdown",
         )
     else:
-        st.info("Upload a PDF and click 'Extract Pages' to begin.")
+        st.info("Upload a PDF and click 'Extract Text' to begin.")
 
+# -------------------------
+# 510(k) Review Pipeline (簡化)
+# -------------------------
 
-def render_summary_tab():
-    st.title("Comprehensive Summary & Entities")
+def render_510k_review_pipeline_tab():
+    st.title(t("Checklist & Report"))
 
-    base_md = st.session_state.get("pdf_to_md_output_edited", "")
-    if base_md:
-        default_input = base_md
-    else:
-        default_input = st.text_area(
-            "Paste markdown to summarize", value="", height=300
-        )
-
-    default_prompt = f"""
-You are assisting an FDA 510(k) reviewer.
-
-Given the following markdown document (derived from a 510(k) or related
-submission), perform two tasks:
-
-1. Produce a 3000–4000 word high-quality summary structured for a 510(k)
-   review memo. Include sections such as:
-   - Device description
-   - Indications for use
-   - Predicate device comparison
-   - Technological characteristics
-   - Performance testing
-   - Biocompatibility
-   - Sterilization and shelf life
-   - Software / cybersecurity (if applicable)
-   - Risk management
-   - Benefit-risk discussion
-   - Overall assessment / outstanding issues
-
-2. Extract at least 20 key entities and present them in a markdown table with
-   columns:
-   - Entity Type (e.g., Indication, Risk, Test, Mitigation, Design Feature)
-   - Entity Name / Phrase
-   - Context (short excerpt or explanation)
-   - Reviewer Comment / Considerations
-   - Location / Section (if evident)
-
-Language: {st.session_state.settings["language"]}.
-"""
-
-    agent_run_ui(
-        agent_id="summary_entities_agent",
-        tab_key="summary",
-        default_prompt=default_prompt,
-        default_input_text=default_input,
-        tab_label_for_history="Summary & Entities",
+    st.markdown("### Step 1 – 提交資料 → 結構化 Markdown")
+    raw_subm = st.text_area(
+        "Paste 510(k) submission material (text/markdown)",
+        height=200,
+        key="subm_paste",
     )
+    default_subm_prompt = """You are a 510(k) submission organizer.
 
+Restructure the following content into organized markdown with sections such as:
+- Device & submitter information
+- Device description and technology
+- Indications for use
+- Predicate/comparator information
+- Performance testing
+- Risks and risk controls
 
-def render_diff_tab():
-    st.title("Dual-Version Comparator")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        pdf_old = st.file_uploader(
-            "Upload Old Version PDF", type=["pdf"], key="pdf_old"
-        )
-    with col2:
-        pdf_new = st.file_uploader(
-            "Upload New Version PDF", type=["pdf"], key="pdf_new"
-        )
-
-    if pdf_old and pdf_new and st.button("Extract Text for Comparison"):
-        st.session_state["old_text"] = extract_pdf_pages_to_text(pdf_old, 1, 9999)
-        st.session_state["new_text"] = extract_pdf_pages_to_text(pdf_new, 1, 9999)
-
-    old_txt = st.session_state.get("old_text", "")
-    new_txt = st.session_state.get("new_text", "")
-
-    if old_txt and new_txt:
-        combined = f"=== OLD VERSION ===\n{old_txt}\n\n=== NEW VERSION ===\n{new_txt}"
-
-        default_prompt = f"""
-You are comparing two versions of a 510(k)-related document.
-
-Tasks:
-1. Identify at least 100 meaningful differences between the OLD and NEW versions.
-2. Differences may include:
-   - Added/removed/changed text
-   - Updated indications, risks, or test results
-   - New mitigation measures
-   - Changes likely to affect safety or effectiveness
-
-3. Present them in a markdown table with columns:
-   - Title (short label for the difference)
-   - Difference (what changed, including before/after summary)
-   - Reference Pages / Sections (approximate, if possible)
-   - Comments (regulatory significance, potential review impact)
-
-Language: {st.session_state.settings["language"]}.
+Do not invent new facts; only reorganize and clarify.
 """
+    if st.button("Structure Submission", key="subm_run_btn"):
+        if not raw_subm.strip():
+            st.warning("Please paste submission material first.")
+        else:
+            api_keys = st.session_state.get("api_keys", {})
+            try:
+                out = call_llm(
+                    model=st.session_state.settings["model"],
+                    system_prompt="You structure a 510(k) submission.",
+                    user_prompt=default_subm_prompt + "\n\n=== SUBMISSION ===\n" + raw_subm,
+                    max_tokens=st.session_state.settings["max_tokens"],
+                    temperature=0.15,
+                    api_keys=api_keys,
+                )
+                st.session_state["subm_struct_md"] = out
+                token_est = int(len(raw_subm + out) / 4)
+                log_event("510(k) Review Pipeline", "Submission Structurer", st.session_state.settings["model"], token_est)
+            except Exception as e:
+                st.error(f"Error: {e}")
 
-        agent_run_ui(
-            agent_id="diff_agent",
-            tab_key="diff",
-            default_prompt=default_prompt,
-            default_input_text=combined,
-            tab_label_for_history="Comparator",
-        )
-
-        st.markdown("---")
-        st.subheader("Run additional agents from agents.yaml on this combined doc")
-
-        agents_cfg = st.session_state["agents_cfg"]
-        agent_ids = list(agents_cfg["agents"].keys())
-        selected_agents = st.multiselect(
-            "Select agents to run on the current combined document", agent_ids
-        )
-
-        current_text = st.session_state.get("diff_output_edited", combined)
-        for aid in selected_agents:
-            st.markdown(f"#### Agent: {agents_cfg['agents'][aid]['name']}")
-            agent_run_ui(
-                agent_id=aid,
-                tab_key=f"diff_{aid}",
-                default_prompt=agents_cfg["agents"][aid].get(
-                    "system_prompt", ""
-                ),
-                default_input_text=current_text,
-                tab_label_for_history=f"Comparator-{aid}",
-            )
-            current_text = st.session_state.get(
-                f"diff_{aid}_output_edited", current_text
-            )
+    subm_md = st.session_state.get("subm_struct_md", "")
+    if subm_md:
+        st.markdown("#### Structured Submission (editable)")
+        st.text_area("Submission (Markdown)", value=subm_md, height=220, key="subm_struct_md_edited")
     else:
-        st.info(
-            "Upload both old and new PDFs, then click 'Extract Text for Comparison'."
-        )
-
-
-def render_checklist_tab():
-    st.title("Review Checklist & Report")
-
-    # Step 1: Checklist
-    st.subheader("Step 1: Provide Review Guidance")
-    guidance_file = st.file_uploader(
-        "Upload guidance (PDF/MD/TXT)", type=["pdf", "md", "txt"]
-    )
-    guidance_text = ""
-    if guidance_file:
-        if guidance_file.type == "application/pdf":
-            guidance_text = extract_pdf_pages_to_text(guidance_file, 1, 9999)
-        else:
-            guidance_text = guidance_file.read().decode("utf-8", errors="ignore")
-
-    manual_guidance = st.text_area("Or paste guidance text/markdown", height=200)
-    guidance_text = guidance_text or manual_guidance
-
-    if guidance_text:
-        default_prompt = st.session_state["agents_cfg"]["agents"].get(
-            "guidance_to_checklist_converter", {}
-        ).get(
-            "user_prompt_template",
-            f"""
-Please generate a comprehensive review checklist based on the following FDA guidance
-document. Create detailed, actionable items grouped by review section.
-
-Guidance:
-{guidance_text}
-""",
-        )
-
-        if (
-            "guidance_to_checklist_converter"
-            in st.session_state["agents_cfg"]["agents"]
-        ):
-            agent_run_ui(
-                agent_id="guidance_to_checklist_converter",
-                tab_key="checklist",
-                default_prompt=default_prompt,
-                default_input_text=guidance_text,
-                tab_label_for_history="Checklist",
-            )
-        else:
-            st.warning(
-                "Agent 'guidance_to_checklist_converter' not found in agents.yaml."
-            )
+        st.info("Structured submission will appear here.")
 
     st.markdown("---")
-    st.subheader("Step 2: Build Review Report")
+    st.markdown("### Step 2 – Checklist → Markdown & Step 3 – 合併產生 Review Report")
 
-    checklist_md = st.session_state.get("checklist_output_edited", "")
-    review_results_file = st.file_uploader(
-        "Upload review results (TXT/MD)", type=["txt", "md"]
+    chk_md = st.text_area(
+        "Paste checklist (markdown or text)",
+        height=200,
+        key="chk_md",
     )
-    review_results_text = ""
-    if review_results_file:
-        review_results_text = review_results_file.read().decode(
-            "utf-8", errors="ignore"
-        )
-    review_results_manual = st.text_area("Or paste review results", height=200)
-    review_results = review_results_text or review_results_manual
 
-    if checklist_md and review_results:
-        default_prompt = st.session_state["agents_cfg"]["agents"].get(
-            "review_memo_builder", {}
-        ).get(
-            "user_prompt_template",
-            f"""
-Please compile the following checklist and review results into a formal FDA 510(k)
-review memorandum.
-
-=== CHECKLIST ===
-{checklist_md}
-
-=== REVIEW RESULTS ===
-{review_results}
-""",
-        )
-
-        combined_input = (
-            f"=== CHECKLIST ===\n{checklist_md}\n\n=== REVIEW RESULTS ===\n{review_results}"
-        )
-
-        if "review_memo_builder" in st.session_state["agents_cfg"]["agents"]:
-            agent_run_ui(
-                agent_id="review_memo_builder",
-                tab_key="review_report",
-                default_prompt=default_prompt,
-                default_input_text=combined_input,
-                tab_label_for_history="Review Report",
-            )
+    if st.button("Build Review Report", key="rep_run_btn"):
+        if not subm_md or not chk_md.strip():
+            st.warning("Need both structured submission and checklist.")
         else:
-            st.warning(
-                "Agent 'review_memo_builder' not found in agents.yaml."
+            api_keys = st.session_state.get("api_keys", {})
+            rep_prompt = """You are drafting an internal FDA 510(k) review memo.
+
+Using the checklist and structured submission, write a concise review report with:
+- Introduction & scope
+- Device and submission overview
+- Summary of key differences vs. predicate(s)
+- Checklist-based assessment (use headings or tables)
+- Overall conclusion and recommendations.
+"""
+            user_prompt = (
+                rep_prompt
+                + "\n\n=== CHECKLIST ===\n"
+                + chk_md
+                + "\n\n=== STRUCTURED SUBMISSION ===\n"
+                + subm_md
             )
-    else:
-        st.info(
-            "Provide both a checklist and review results to generate a report."
-        )
+            try:
+                out = call_llm(
+                    model=st.session_state.settings["model"],
+                    system_prompt="You are an FDA 510(k) reviewer.",
+                    user_prompt=user_prompt,
+                    max_tokens=st.session_state.settings["max_tokens"],
+                    temperature=0.18,
+                    api_keys=api_keys,
+                )
+                st.session_state["rep_md"] = out
+                token_est = int(len(user_prompt + out) / 4)
+                log_event("510(k) Review Pipeline", "Review Memo Builder", st.session_state.settings["model"], token_est)
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+    rep_md = st.session_state.get("rep_md", "")
+    if rep_md:
+        st.markdown("#### Review Report (editable)")
+        st.text_area("Review Report (Markdown)", value=rep_md, height=260, key="rep_md_edited")
+
+# -------------------------
+# Note Keeper & Magics
+# -------------------------
+
+def highlight_keywords(text: str, keywords: list[str], color: str) -> str:
+    if not text or not keywords:
+        return text
+    out = text
+    for kw in sorted(set([k for k in keywords if k.strip()]), key=len, reverse=True):
+        safe_kw = kw.strip()
+        if not safe_kw:
+            continue
+        span = f'<span style="color:{color};font-weight:600;">{safe_kw}</span>'
+        out = out.replace(safe_kw, span)
+    return out
 
 
 def render_note_keeper_tab():
-    st.title("AI Note Keeper & Magics")
+    st.title(t("Note Keeper & Magics"))
 
-    st.markdown(
-        '<div class="wow-section-header">'
-        '<div class="wow-section-header-dot"></div>'
-        '<span>Raw Notes</span>'
-        "</div>",
-        unsafe_allow_html=True,
-    )
+    st.markdown("### Step 1 – Paste Notes & Transform to Structured Markdown")
+    raw_notes = st.text_area("Paste your notes (text or markdown)", height=220, key="notes_raw")
 
-    raw_notes = st.text_area(
-        "Paste your notes (text or markdown)", height=260, key="notes_raw"
-    )
-
-    # Primary Note Keeper agent: transform to structured markdown
-    if raw_notes:
-        default_prompt = """
-You are restructuring a 510(k) reviewer's notes into organized markdown.
-
-Tasks:
-1. Identify major sections and sub-sections.
-2. Convert bullet fragments into readable sentences where helpful.
-3. Highlight key points, open questions, and follow-up items.
-4. Avoid inventing information not present in the notes.
-"""
-        agent_run_ui(
-            agent_id="note_keeper_agent",
-            tab_key="notes",
-            default_prompt=default_prompt,
-            default_input_text=raw_notes,
-            tab_label_for_history="Note Keeper",
-        )
-
-    processed = st.session_state.get("notes_output_edited", raw_notes)
-
-    st.markdown("---")
-    st.subheader("Edit Structured Note")
-
-    note_view_mode = st.radio(
-        "Note view",
-        ["Markdown", "Plain text"],
-        horizontal=True,
-        key="notes_view_mode",
-    )
-    if note_view_mode == "Markdown":
-        edited_note = st.text_area(
-            "Structured note (Markdown, editable)",
-            value=processed,
-            height=260,
-            key="notes_structured_md",
-        )
-    else:
-        edited_note = st.text_area(
-            "Structured note (Plain text, editable)",
-            value=processed,
-            height=260,
-            key="notes_structured_txt",
-        )
-    st.session_state["notes_structured_effective"] = edited_note
-
-    st.markdown("---")
-    st.subheader("AI Magics")
-
-    st.markdown("Select a Magic and apply it to the current structured note.")
-    agents_cfg = st.session_state["agents_cfg"]
-
-    # Define desired magic agents (6 total as requested)
-    desired_magic_agents = {
-        "AI Formatting": "magic_formatting_agent",
-        "AI Keywords": "magic_keywords_agent",
-        "AI Action Items": "magic_action_items_agent",
-        "AI Concept Map": "magic_concept_map_agent",
-        "AI Glossary": "magic_glossary_agent",
-        "AI Outline": "magic_outline_agent",  # 6th magic feature
-    }
-    # Only include those that actually exist in agents.yaml
-    magic_options = {
-        label: aid
-        for label, aid in desired_magic_agents.items()
-        if aid in agents_cfg.get("agents", {})
-    }
-
-    if not magic_options:
-        st.warning(
-            "No Magic agents found in agents.yaml. Please add them to use AI Magics."
-        )
-        return
-
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        magic_name = st.selectbox("Magic", list(magic_options.keys()))
-    with col2:
-        keyword_color = st.color_picker(
-            "Keyword color (for AI Keywords)", "#ff7f50"
-        )  # coral default
-
-    # User can optionally specify custom keywords for the AI Keywords Magic
-    custom_keywords = st.text_input(
-        "Custom keywords for AI Keywords (comma-separated, optional)"
-    )
-    custom_magic_instruction = st.text_area(
-        "Optional extra instruction to apply for this Magic",
-        height=80,
-        key="magic_custom_instruction",
-    )
-
-    if st.button("Apply Magic"):
-        agent_id = magic_options[magic_name]
-        agent_def = agents_cfg["agents"][agent_id]
-        base_prompt = agent_def["system_prompt"]
-
-        magic_prompt_suffix = ""
-        if magic_name == "AI Keywords":
-            # Respect user keywords and color selection
-            magic_prompt_suffix = f"""
-When returning keywords, focus on the most important regulatory and technical
-keywords in the note. If the user has provided an explicit keyword list,
-treat those as highest priority.
-
-User-specified keywords (may be empty): {custom_keywords}
-
-For each keyword, wrap it in an HTML span with inline style using this color:
-{keyword_color}.
-
-Example:
-<span style="color:{keyword_color};font-weight:bold;">predicate device</span>
-"""
-        if custom_magic_instruction.strip():
-            magic_prompt_suffix += (
-                "\n\nAdditional user instruction:\n"
-                + custom_magic_instruction.strip()
-            )
-
-        full_prompt = base_prompt + "\n\n" + magic_prompt_suffix
-
-        agent_run_ui(
-            agent_id=agent_id,
-            tab_key=f"magic_{agent_id}",
-            default_prompt=full_prompt,
-            default_input_text=st.session_state.get(
-                "notes_structured_effective", edited_note
-            ),
-            tab_label_for_history=f"Magic-{magic_name}",
-        )
-
-
-# =========================
-# New Tab: FDA Reviewer Orchestration
-# =========================
-
-def render_fda_orchestration_tab():
-    st.title("FDA Reviewer Orchestration")
-
-    # Step 1: Device Description Ingestion
-    st.subheader(
-        "Step 1 – Provide Device Description (text / markdown / JSON or file upload)"
-    )
-
-    col1, col2 = st.columns(2)
-    with col1:
-        device_raw_text = st.text_area(
-            "Paste device description (device name, classification, description, intended use, etc.)",
-            height=260,
-            key="orch_device_raw",
-        )
-    with col2:
-        file = st.file_uploader(
-            "Or upload device file (PDF / DOCX / TXT)", type=["pdf", "docx", "txt"]
-        )
-        if file is not None:
-            if file.type == "application/pdf":
-                extracted = extract_pdf_pages_to_text(file, 1, 9999)
-            elif (
-                file.type
-                == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            ):
-                extracted = extract_docx_to_text(file)
-            else:  # txt
-                extracted = file.read().decode("utf-8", errors="ignore")
-            if st.button("Use uploaded file as device description"):
-                st.session_state["orch_device_raw"] = extracted
-                device_raw_text = extracted
-                st.success("Loaded device description from file.")
-
-    # Step 1b: Transform to organized markdown with coral keywords
-    st.markdown(
-        "#### Step 1b – Transform into organized markdown with highlighted keywords"
-    )
-    if "orch_device_struct_status" not in st.session_state:
-        st.session_state["orch_device_struct_status"] = "pending"
-    show_status(
-        "Device Description Structuring",
-        st.session_state["orch_device_struct_status"],
-    )
-
-    colm1, colm2 = st.columns([2, 1])
-    with colm1:
-        struct_model = st.selectbox(
-            "Model for structuring",
+    col_n1, col_n2 = st.columns(2)
+    with col_n1:
+        note_model = st.selectbox(
+            "Model for Note → Markdown",
             ALL_MODELS,
             index=ALL_MODELS.index(st.session_state.settings["model"]),
-            key="orch_device_model",
+            key="note_model",
         )
-    with colm2:
-        struct_max_tokens = st.number_input(
+    with col_n2:
+        note_max_tokens = st.number_input(
             "max_tokens",
-            min_value=1000,
+            min_value=2000,
             max_value=120000,
-            value=st.session_state.settings["max_tokens"],
+            value=12000,
             step=1000,
-            key="orch_device_max_tokens",
+            key="note_max_tokens",
         )
 
-    if st.button("Transform to structured markdown", key="orch_device_run"):
-        if not device_raw_text.strip():
-            st.warning("Please provide device text or upload a file first.")
-        else:
-            st.session_state["orch_device_struct_status"] = "running"
-            show_status("Device Description Structuring", "running")
-            api_keys = st.session_state.get("api_keys", {})
-            system_prompt = """
-You are a medical device documentation organizer.
+    default_note_prompt = """你是一位協助醫療器材/510(k)/TFDA 審查員整理個人筆記的助手。
 
-Input: unstructured device description text (may include device name, classification,
-regulation number, product code, intended use, technological characteristics,
-key materials, key risks, and any other relevant info).
+請將下列雜亂或半結構化的筆記，整理成：
 
-Task:
-1. Produce a CLEAN, well-structured markdown device description with sections like:
-   - Device Name
-   - Classification & Regulation
-   - Product Code (if any)
-   - Intended Use / Indications for Use
-   - Device Description
-   - Technological Characteristics
-   - Key Performance Claims
-   - Key Risks and Risk Controls (if mentioned)
-2. Within the markdown, highlight important regulatory and technical keywords
-   using coral color:
-   Wrap each important keyword or short phrase with:
-   <span style="color:coral;font-weight:600;">keyword</span>
-3. Do NOT invent content. Only structure what is present. You may group information
-   and make headings but do not hallucinate new facts.
+1. 清晰的 Markdown 結構（標題、子標題、條列）。
+2. 保留所有技術與法規重點，不要憑空新增內容。
+3. 顯示出：
+   - 關鍵技術要點
+   - 主要風險與疑問
+   - 待釐清/追問事項
 """
-            user_prompt = device_raw_text
-
-            with st.spinner("Transforming device description..."):
-                try:
-                    out = call_llm(
-                        model=struct_model,
-                        system_prompt=system_prompt,
-                        user_prompt=user_prompt,
-                        max_tokens=struct_max_tokens,
-                        temperature=0.15,
-                        api_keys=api_keys,
-                    )
-                    st.session_state["orch_device_md"] = out
-                    st.session_state["orch_device_struct_status"] = "done"
-                    token_est = int(len(user_prompt + out) / 4)
-                    log_event(
-                        "FDA Orchestration",
-                        "Device Description Structurer",
-                        struct_model,
-                        token_est,
-                    )
-                except Exception as e:
-                    st.session_state["orch_device_struct_status"] = "error"
-                    st.error(f"Error structuring device description: {e}")
-
-    st.markdown("##### Structured Device Description (editable)")
-    device_md = st.session_state.get("orch_device_md", device_raw_text)
-    view_mode = st.radio(
-        "View mode",
-        ["Markdown", "Plain text"],
-        horizontal=True,
-        key="orch_device_viewmode",
+    note_struct_prompt = st.text_area(
+        "Prompt for Note → Markdown",
+        value=default_note_prompt,
+        height=180,
+        key="note_struct_prompt",
     )
-    if view_mode == "Markdown":
-        device_md_edited = st.text_area(
-            "Device description (Markdown)",
-            value=device_md,
+
+    if st.button("Transform notes to structured Markdown", key="note_run_btn"):
+        if not raw_notes.strip():
+            st.warning("Please paste notes first.")
+        else:
+            api_keys = st.session_state.get("api_keys", {})
+            user_prompt = note_struct_prompt + "\n\n=== RAW NOTES ===\n" + raw_notes
+            try:
+                out = call_llm(
+                    model=note_model,
+                    system_prompt="You organize reviewer's notes into clean markdown.",
+                    user_prompt=user_prompt,
+                    max_tokens=note_max_tokens,
+                    temperature=0.15,
+                    api_keys=api_keys,
+                )
+                st.session_state["note_md"] = out
+                token_est = int(len(user_prompt + out) / 4)
+                log_event("Note Keeper", "Note Structurer", note_model, token_est)
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+    note_md = st.session_state.get("note_md", raw_notes)
+    st.markdown("#### Structured Note (editable)")
+    note_view = st.radio(
+        "View mode for base note", ["Markdown", "Plain text"],
+        horizontal=True, key="note_view_mode",
+    )
+    if note_view == "Markdown":
+        note_md_edited = st.text_area(
+            "Note (Markdown)",
+            value=note_md,
             height=260,
-            key="orch_device_md_edited",
+            key="note_md_edited",
         )
     else:
-        device_md_edited = st.text_area(
-            "Device description (Plain text)",
-            value=device_md,
+        note_md_edited = st.text_area(
+            "Note (Plain text)",
+            value=note_md,
             height=260,
-            key="orch_device_txt_edited",
+            key="note_txt_edited",
         )
-    st.session_state["orch_device_md_effective"] = device_md_edited
+    st.session_state["note_effective"] = note_md_edited
 
-    # Step 2: Agents Catalog (default or uploaded)
+    base_note = st.session_state.get("note_effective", "")
+
+    # --- Magic 1: AI Formatting ---
     st.markdown("---")
-    st.subheader("Step 2 – Select agents.yaml (default or uploaded)")
+    st.markdown("### Magic 1 – AI Formatting")
+
+    fmt_model = st.selectbox(
+        "Model (Formatting)",
+        ALL_MODELS,
+        index=ALL_MODELS.index(st.session_state.settings["model"]),
+        key="fmt_model",
+    )
+    fmt_prompt = st.text_area(
+        "Prompt for AI Formatting",
+        value="請在不改變內容的前提下，統一標題層級與條列格式，讓此筆記更易讀（輸出 Markdown）。",
+        height=120,
+        key="fmt_prompt",
+    )
+
+    if st.button("Run AI Formatting", key="fmt_run_btn"):
+        if not base_note.strip():
+            st.warning("No base note available.")
+        else:
+            api_keys = st.session_state.get("api_keys", {})
+            user_prompt = fmt_prompt + "\n\n=== NOTE ===\n" + base_note
+            try:
+                out = call_llm(
+                    model=fmt_model,
+                    system_prompt="You are a formatting-only assistant for markdown notes.",
+                    user_prompt=user_prompt,
+                    max_tokens=12000,
+                    temperature=0.1,
+                    api_keys=api_keys,
+                )
+                st.session_state["fmt_note"] = out
+                token_est = int(len(user_prompt + out) / 4)
+                log_event("Note Keeper", "AI Formatting", fmt_model, token_est)
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+    fmt_note = st.session_state.get("fmt_note", "")
+    if fmt_note:
+        st.text_area(
+            "Formatted Note (Markdown)",
+            value=fmt_note,
+            height=220,
+            key="fmt_note_edited",
+        )
+
+    # --- Magic 2: AI Keywords (顏色可選，不用 LLM) ---
+    st.markdown("---")
+    st.markdown("### Magic 2 – AI Keywords (Manual highlight)")
+
+    kw_input = st.text_input(
+        "Keywords (comma-separated)",
+        key="kw_input",
+        value="510(k), TFDA, QMS, biocompatibility",
+    )
+    kw_color = st.color_picker("Color for keywords", "#ff7f50", key="kw_color")
+
+    if st.button("Apply Keyword Highlighting", key="kw_run_btn"):
+        if not base_note.strip():
+            st.warning("No base note available.")
+        else:
+            keywords = [k.strip() for k in kw_input.split(",") if k.strip()]
+            highlighted = highlight_keywords(base_note, keywords, kw_color)
+            st.session_state["kw_note"] = highlighted
+
+    kw_note = st.session_state.get("kw_note", "")
+    if kw_note:
+        st.markdown("#### Note with Highlighted Keywords (Markdown rendering)")
+        st.markdown(kw_note, unsafe_allow_html=True)
+
+    # --- Magic 3: AI Summary ---
+    st.markdown("---")
+    st.markdown("### Magic 3 – AI Summary")
+
+    sum_model = st.selectbox(
+        "Model (Summary)",
+        ALL_MODELS,
+        index=ALL_MODELS.index("gpt-4o-mini") if "gpt-4o-mini" in ALL_MODELS else 0,
+        key="note_sum_model",
+    )
+    sum_prompt = st.text_area(
+        "Prompt for Summary",
+        value="請將以下審查筆記摘要為 5–10 個重點 bullet，並附上一段 3–5 句的整體摘要（使用繁體中文）。",
+        height=150,
+        key="note_sum_prompt",
+    )
+    if st.button("Run AI Summary", key="note_sum_run_btn"):
+        if not base_note.strip():
+            st.warning("No base note available.")
+        else:
+            api_keys = st.session_state.get("api_keys", {})
+            user_prompt = sum_prompt + "\n\n=== NOTE ===\n" + base_note
+            try:
+                out = call_llm(
+                    model=sum_model,
+                    system_prompt="You write executive-style regulatory summaries.",
+                    user_prompt=user_prompt,
+                    max_tokens=12000,
+                    temperature=0.2,
+                    api_keys=api_keys,
+                )
+                st.session_state["note_summary"] = out
+                token_est = int(len(user_prompt + out) / 4)
+                log_event("Note Keeper", "AI Summary", sum_model, token_est)
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+    note_summary = st.session_state.get("note_summary", "")
+    if note_summary:
+        st.text_area(
+            "Summary",
+            value=note_summary,
+            height=200,
+            key="note_summary_edited",
+        )
+
+    # --- Magic 4: AI Action Items ---
+    st.markdown("---")
+    st.markdown("### Magic 4 – AI Action Items (待辦與補件清單)")
+
+    act_model = st.selectbox(
+        "Model (Action Items)",
+        ALL_MODELS,
+        index=ALL_MODELS.index(st.session_state.settings["model"]),
+        key="note_act_model",
+    )
+    act_prompt = st.text_area(
+        "Prompt for Action Items",
+        value="請從以下筆記中萃取需要後續行動的事項（補件、澄清、內部會議等），並以 Markdown 表格輸出：項目、負責人(可留空)、優先順序、說明。",
+        height=150,
+        key="note_act_prompt",
+    )
+    if st.button("Run AI Action Items", key="note_act_run_btn"):
+        if not base_note.strip():
+            st.warning("No base note available.")
+        else:
+            api_keys = st.session_state.get("api_keys", {})
+            user_prompt = act_prompt + "\n\n=== NOTE ===\n" + base_note
+            try:
+                out = call_llm(
+                    model=act_model,
+                    system_prompt="You extract action items from regulatory review notes.",
+                    user_prompt=user_prompt,
+                    max_tokens=12000,
+                    temperature=0.2,
+                    api_keys=api_keys,
+                )
+                st.session_state["note_actions"] = out
+                token_est = int(len(user_prompt + out) / 4)
+                log_event("Note Keeper", "AI Action Items", act_model, token_est)
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+    note_actions = st.session_state.get("note_actions", "")
+    if note_actions:
+        st.text_area(
+            "Action Items",
+            value=note_actions,
+            height=220,
+            key="note_actions_edited",
+        )
+
+    # --- Magic 5: AI Glossary ---
+    st.markdown("---")
+    st.markdown("### Magic 5 – AI Glossary (術語表)")
+
+    glo_model = st.selectbox(
+        "Model (Glossary)",
+        ALL_MODELS,
+        index=ALL_MODELS.index("gemini-2.5-flash") if "gemini-2.5-flash" in ALL_MODELS else 0,
+        key="note_glo_model",
+    )
+    glo_prompt = st.text_area(
+        "Prompt for Glossary",
+        value="請從以下筆記中找出重要專有名詞 (英文縮寫、標準、指引文件名稱、專業術語)，製作 Markdown 表格：Term, Full Name/Chinese, Explanation。",
+        height=150,
+        key="note_glo_prompt",
+    )
+    if st.button("Run AI Glossary", key="note_glo_run_btn"):
+        if not base_note.strip():
+            st.warning("No base note available.")
+        else:
+            api_keys = st.session_state.get("api_keys", {})
+            user_prompt = glo_prompt + "\n\n=== NOTE ===\n" + base_note
+            try:
+                out = call_llm(
+                    model=glo_model,
+                    system_prompt="You build glossaries for regulatory/technical notes.",
+                    user_prompt=user_prompt,
+                    max_tokens=12000,
+                    temperature=0.2,
+                    api_keys=api_keys,
+                )
+                st.session_state["note_glossary"] = out
+                token_est = int(len(user_prompt + out) / 4)
+                log_event("Note Keeper", "AI Glossary", glo_model, token_est)
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+    note_glossary = st.session_state.get("note_glossary", "")
+    if note_glossary:
+        st.text_area(
+            "Glossary",
+            value=note_glossary,
+            height=220,
+            key="note_glossary_edited",
+        )
+
+# -------------------------
+# Agents Config Studio
+# -------------------------
+
+def render_agents_config_tab():
+    st.title(t("Agents Config"))
 
     agents_cfg = st.session_state["agents_cfg"]
-    with st.expander("Current agents catalog overview"):
-        agents_df = pd.DataFrame(
+    agents_dict = agents_cfg.get("agents", {})
+
+    st.subheader("1. Current Agents Overview")
+    if not agents_dict:
+        st.warning("No agents found in current agents.yaml.")
+    else:
+        df = pd.DataFrame(
             [
                 {
                     "agent_id": aid,
                     "name": acfg.get("name", ""),
+                    "model": acfg.get("model", ""),
                     "category": acfg.get("category", ""),
                 }
-                for aid, acfg in agents_cfg.get("agents", {}).items()
+                for aid, acfg in agents_dict.items()
             ]
         )
-        st.dataframe(agents_df, use_container_width=True, height=240)
+        st.dataframe(df, use_container_width=True, height=260)
 
-    # Step 3: Orchestration Plan Generation
     st.markdown("---")
-    st.subheader("Step 3 – Generate FDA 510(k) Review Orchestration Plan")
+    st.subheader("2. Edit Full agents.yaml (raw text)")
 
-    colx1, colx2, colx3 = st.columns(3)
-    with colx1:
-        submission_type = st.text_input(
-            "Submission Type (e.g., Traditional 510(k))", ""
-        )
-    with colx2:
-        regulatory_pathway = st.text_input("Regulatory Pathway", "510(k)")
-    with colx3:
-        clinical_data_status = st.selectbox(
-            "Clinical Data Available?",
-            ["Unclear", "Yes", "No"],
-            index=0,
-        )
-
-    known_predicates = st.text_input("Known predicate devices (free text)", "")
-    special_circumstances = st.text_area(
-        "Special circumstances (pediatric, home use, AI/ML, etc.)", height=80
-    )
-
-    depth_choice = st.radio(
-        "Requested analysis depth",
-        ["Quick Assessment", "Standard Orchestration", "Comprehensive Planning"],
-        index=1,
-        horizontal=True,
-    )
-    depth_quick = (
-        "☑ Quick Assessment (identify primary agents only)"
-        if depth_choice == "Quick Assessment"
-        else "☐ Quick Assessment (identify primary agents only)"
-    )
-    depth_standard = (
-        "☑ Standard Orchestration (full phase-based plan)"
-        if depth_choice == "Standard Orchestration"
-        else "☐ Standard Orchestration (full phase-based plan)"
-    )
-    depth_comprehensive = (
-        "☑ Comprehensive Planning (include timeline, challenges, execution commands)"
-        if depth_choice == "Comprehensive Planning"
-        else "☐ Comprehensive Planning (include timeline, challenges, execution commands)"
-    )
-
-    base_user_prompt = FDA_ORCH_USER_TEMPLATE.format(
-        device_information=device_md_edited or "[Device description not provided]",
-        submission_type=submission_type or "[Not provided]",
-        regulatory_pathway=regulatory_pathway or "[Not provided]",
-        known_predicates=known_predicates or "[Not provided]",
-        clinical_data_status=clinical_data_status,
-        special_circumstances=special_circumstances or "[None noted]",
-        depth_quick=depth_quick,
-        depth_standard=depth_standard,
-        depth_comprehensive=depth_comprehensive,
-    )
-
-    st.markdown("##### Orchestration Prompt (editable before running)")
-    orch_prompt_text = st.text_area(
-        "Orchestration prompt",
-        value=st.session_state.get("orch_prompt_text", base_user_prompt),
-        height=260,
-        key="orch_prompt_text",
-    )
-
-    colp1, colp2, colp3 = st.columns([2, 1, 1])
-    with colp1:
-        orch_model = st.selectbox(
-            "Model for orchestration",
-            ALL_MODELS,
-            index=ALL_MODELS.index(st.session_state.settings["model"]),
-            key="orch_model",
-        )
-    with colp2:
-        orch_max_tokens = st.number_input(
-            "max_tokens",
-            min_value=8000,
-            max_value=120000,
-            value=max(20000, st.session_state.settings["max_tokens"]),
-            step=2000,
-            key="orch_max_tokens",
-        )
-    with colp3:
-        if "orch_status" not in st.session_state:
-            st.session_state["orch_status"] = "pending"
-        show_status("FDA Review Orchestrator", st.session_state["orch_status"])
-
-    if st.button("Run Orchestrator", key="orch_run"):
-        st.session_state["orch_status"] = "running"
-        show_status("FDA Review Orchestrator", "running")
-        api_keys = st.session_state.get("api_keys", {})
-
-        agents_yaml_str = yaml.dump(
-            agents_cfg.get("agents", {}), allow_unicode=True, sort_keys=False
-        )
-        user_prompt_full = (
-            orch_prompt_text
-            + "\n\n---\n\nAGENT CATALOG (agents.yaml excerpt):\n\n"
-            + agents_yaml_str
-        )
-
-        with st.spinner("Creating orchestration plan..."):
-            try:
-                out = call_llm(
-                    model=orch_model,
-                    system_prompt=FDA_ORCH_SYSTEM_PROMPT,
-                    user_prompt=user_prompt_full,
-                    max_tokens=orch_max_tokens,
-                    temperature=0.2,
-                    api_keys=api_keys,
-                )
-                st.session_state["orch_plan"] = out
-                st.session_state["orch_status"] = "done"
-                token_est = int(len(user_prompt_full + out) / 4)
-                log_event(
-                    "FDA Orchestration",
-                    "FDA Review Orchestrator",
-                    orch_model,
-                    token_est,
-                )
-            except Exception as e:
-                st.session_state["orch_status"] = "error"
-                st.error(f"Error running orchestrator: {e}")
-
-    st.markdown("##### Orchestration Plan (Markdown / text, editable)")
-    orch_plan = st.session_state.get("orch_plan", "")
-    view_mode2 = st.radio(
-        "Plan view mode",
-        ["Markdown", "Plain text"],
-        horizontal=True,
-        key="orch_plan_viewmode",
-    )
-    if view_mode2 == "Markdown":
-        orch_plan_edited = st.text_area(
-            "Orchestration Plan (Markdown)",
-            value=orch_plan,
-            height=360,
-            key="orch_plan_md_edited",
-        )
-    else:
-        orch_plan_edited = st.text_area(
-            "Orchestration Plan (Plain text)",
-            value=orch_plan,
-            height=360,
-            key="orch_plan_txt_edited",
-        )
-    st.session_state["orch_plan_effective"] = orch_plan_edited
-
-    # Step 4: Execute agents one by one, chaining outputs
-    st.markdown("---")
-    st.subheader("Step 4 – Execute Review Agents (chain outputs between agents)")
-
-    agent_ids = list(agents_cfg["agents"].keys())
-    selected_agents = st.multiselect(
-        "Select agents to run sequentially",
-        agent_ids,
-        help="You can run agents one by one using the orchestration plan or device description as input.",
-    )
-
-    base_chain_input = st.session_state.get(
-        "orch_plan_effective", ""
-    ) or st.session_state.get("orch_device_md_effective", "")
-    current_text = base_chain_input
-
-    if not base_chain_input:
-        st.info(
-            "Once you have an orchestration plan or structured device description, you can use it as the starting input here."
-        )
-
-    for aid in selected_agents:
-        st.markdown(f"#### Agent: {agents_cfg['agents'][aid].get('name', aid)}")
-        agent_run_ui(
-            agent_id=aid,
-            tab_key=f"orch_exec_{aid}",
-            default_prompt=agents_cfg["agents"][aid].get(
-                "user_prompt_template",
-                agents_cfg["agents"][aid].get("system_prompt", ""),
-            ),
-            default_input_text=current_text,
-            tab_label_for_history=f"Orchestration-{aid}",
-        )
-        current_text = st.session_state.get(
-            f"orch_exec_{aid}_output_edited", current_text
-        )
-
-
-# =========================
-# New Tab: Dynamic Review Agent Generator from FDA Guidance
-# =========================
-
-def render_dynamic_agents_tab():
-    st.title("Dynamic Review Agent Generator from FDA Guidance")
-
-    # Step 1: Guidance ingestion
-    st.subheader("Step 1 – Provide FDA Guidance Text")
-    gfile = st.file_uploader(
-        "Upload guidance (PDF / MD / TXT)", type=["pdf", "md", "txt"], key="dyn_guidance_file"
-    )
-    guidance_text = ""
-    if gfile is not None:
-        if gfile.type == "application/pdf":
-            guidance_text = extract_pdf_pages_to_text(gfile, 1, 9999)
-        else:
-            guidance_text = gfile.read().decode("utf-8", errors="ignore")
-
-    guidance_text_manual = st.text_area(
-        "Or paste guidance text/markdown here",
-        height=220,
-        key="dyn_guidance_manual",
-    )
-    guidance_text = guidance_text or guidance_text_manual
-
-    if not guidance_text.strip():
-        st.info(
-            "Provide FDA guidance text to enable checklist and dynamic agent generation."
-        )
-        return
-
-    # Optional: Generate checklist using existing guidance_to_checklist_converter agent
-    st.markdown("---")
-    st.subheader("Step 2 – (Optional) Generate Review Checklist from Guidance")
-
-    if "guidance_to_checklist_converter" in st.session_state["agents_cfg"]["agents"]:
-        default_prompt = st.session_state["agents_cfg"]["agents"][
-            "guidance_to_checklist_converter"
-        ].get(
-            "user_prompt_template",
-            f"Please generate a detailed review checklist from the following guidance:\n\n{guidance_text}\n",
-        )
-        agent_run_ui(
-            agent_id="guidance_to_checklist_converter",
-            tab_key="dyn_checklist",
-            default_prompt=default_prompt,
-            default_input_text=guidance_text,
-            tab_label_for_history="Dynamic-Checklist",
-        )
-    else:
-        st.warning(
-            "Agent 'guidance_to_checklist_converter' not found in agents.yaml; skipping checklist step."
-        )
-
-    checklist_md = st.session_state.get("dyn_checklist_output_edited", "")
-
-    # Step 3: Dynamic Agent Generator
-    st.markdown("---")
-    st.subheader("Step 3 – Generate New Specialized Agents from Guidance")
-
-    if "dyn_agent_status" not in st.session_state:
-        st.session_state["dyn_agent_status"] = "pending"
-    show_status("Dynamic Agent Generator", st.session_state["dyn_agent_status"])
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        dyn_model = st.selectbox(
-            "Model for dynamic agents",
-            ALL_MODELS,
-            index=ALL_MODELS.index(st.session_state.settings["model"]),
-            key="dyn_agent_model",
-        )
-    with col2:
-        dyn_max_tokens = st.number_input(
-            "max_tokens",
-            min_value=8000,
-            max_value=120000,
-            value=max(20000, st.session_state.settings["max_tokens"]),
-            step=2000,
-            key="dyn_agent_max_tokens",
-        )
-    with col3:
-        num_agents_hint = st.slider(
-            "Target number of new agents (hint to model)",
-            min_value=3,
-            max_value=8,
-            value=5,
-            step=1,
-            key="dyn_agent_count",
-        )
-
-    current_agents_yaml = yaml.dump(
-        st.session_state["agents_cfg"].get("agents", {}),
+    yaml_str_current = yaml.dump(
+        st.session_state["agents_cfg"],
         allow_unicode=True,
         sort_keys=False,
     )
-    dyn_user_prompt = f"""
-You are given the following FDA guidance text:
+    edited_yaml_text = st.text_area(
+        "agents.yaml (editable)",
+        value=yaml_str_current,
+        height=320,
+        key="agents_yaml_text_editor",
+    )
 
-=== FDA GUIDANCE TEXT ===
-{guidance_text}
-
-=== OPTIONAL CHECKLIST (if present) ===
-{checklist_md if checklist_md else "[No checklist provided]"} 
-
-=== EXISTING AGENTS CATALOG (agents.yaml excerpt) ===
-{current_agents_yaml}
-
-Your task: create approximately {num_agents_hint} NEW specialized review agents
-(to be added to agents.yaml) that are carefully tailored to this guidance, without
-duplicating existing agents.
-"""
-
-    if st.button("Generate New Agents.yaml Snippet", key="dyn_agent_run"):
-        st.session_state["dyn_agent_status"] = "running"
-        show_status("Dynamic Agent Generator", "running")
-        api_keys = st.session_state.get("api_keys", {})
-
-        with st.spinner("Generating new agent definitions from guidance..."):
+    col_a1, col_a2, col_a3 = st.columns(3)
+    with col_a1:
+        if st.button("Apply edited YAML to session", key="apply_edited_yaml"):
             try:
-                out = call_llm(
-                    model=dyn_model,
-                    system_prompt=DYNAMIC_AGENT_SYSTEM_PROMPT,
-                    user_prompt=dyn_user_prompt,
-                    max_tokens=dyn_max_tokens,
-                    temperature=0.2,
-                    api_keys=api_keys,
-                )
-                st.session_state["dyn_agent_yaml"] = out
-                st.session_state["dyn_agent_status"] = "done"
-                token_est = int(len(dyn_user_prompt + out) / 4)
-                log_event(
-                    "Dynamic Agents",
-                    "Dynamic Agent Generator",
-                    dyn_model,
-                    token_est,
-                )
+                cfg = yaml.safe_load(edited_yaml_text)
+                if not isinstance(cfg, dict) or "agents" not in cfg:
+                    st.error("Parsed YAML does not contain top-level key 'agents'. No changes applied.")
+                else:
+                    st.session_state["agents_cfg"] = cfg
+                    st.success("Updated agents.yaml in current session.")
             except Exception as e:
-                st.session_state["dyn_agent_status"] = "error"
-                st.error(f"Error generating dynamic agents: {e}")
+                st.error(f"Failed to parse edited YAML: {e}")
 
-    st.markdown("##### Generated agents.yaml snippet (editable)")
-    dyn_yaml = st.session_state.get("dyn_agent_yaml", "")
-    dyn_yaml_edited = st.text_area(
-        "agents.yaml snippet",
-        value=dyn_yaml,
-        height=360,
-        key="dyn_agent_yaml_edited",
-    )
+    with col_a2:
+        uploaded_agents_tab = st.file_uploader(
+            "Upload agents.yaml file",
+            type=["yaml", "yml"],
+            key="agents_yaml_tab_uploader",
+        )
+        if uploaded_agents_tab is not None:
+            try:
+                cfg = yaml.safe_load(uploaded_agents_tab.read())
+                if "agents" in cfg:
+                    st.session_state["agents_cfg"] = cfg
+                    st.success("Uploaded agents.yaml applied to this session.")
+                else:
+                    st.warning("Uploaded file has no top-level 'agents' key. Ignoring.")
+            except Exception as e:
+                st.error(f"Failed to parse uploaded YAML: {e}")
 
-    if dyn_yaml_edited.strip():
+    with col_a3:
         st.download_button(
-            "Download agents.yaml snippet",
-            data=dyn_yaml_edited.encode("utf-8"),
-            file_name="dynamic_agents.yaml",
+            "Download current agents.yaml",
+            data=yaml_str_current.encode("utf-8"),
+            file_name="agents.yaml",
             mime="text/yaml",
-        )
-        st.info(
-            "You can merge this YAML into your main agents.yaml and reload the app (or upload via sidebar)."
+            key="download_agents_yaml_current",
         )
 
-
 # =========================
-# SKILL.md Tab
-# =========================
-
-def render_skill_tab():
-    st.title(t("SKILL Panel"))
-    content = load_skill_md()
-    if not content:
-        st.info("SKILL.md not found in this Space repository.")
-        return
-
-    st.markdown(
-        "Below is the full content of `SKILL.md`, which documents system skills, "
-        "capabilities, and best practices for using the 510(k) Agentic AI Review System."
-    )
-    st.markdown("---")
-    st.markdown(content)
-
-
-# =========================
-# Main app
+# Main
 # =========================
 
-st.set_page_config(
-    page_title="FDA 510(k) Agentic Reviewer",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+st.set_page_config(page_title="Agentic Medical Device Reviewer", layout="wide")
 
-# Initialize session state
 if "settings" not in st.session_state:
     st.session_state["settings"] = {
         "theme": "Light",
-        "language": "English",
+        "language": "繁體中文",
         "painter_style": "Van Gogh",
         "model": "gpt-4o-mini",
         "max_tokens": 12000,
         "temperature": 0.2,
     }
-
 if "history" not in st.session_state:
     st.session_state["history"] = []
 
-# Load default agents.yaml once (can be overridden in sidebar)
+# Load agents.yaml or default minimal
 if "agents_cfg" not in st.session_state:
     try:
         with open("agents.yaml", "r", encoding="utf-8") as f:
             st.session_state["agents_cfg"] = yaml.safe_load(f)
-    except Exception as e:
-        st.error(f"Failed to load agents.yaml: {e}")
-        st.stop()
+    except Exception:
+        # minimal fallback
+        st.session_state["agents_cfg"] = {
+            "agents": {
+                "fda_510k_intel_agent": {
+                    "name": "510(k) Intelligence Agent",
+                    "model": "gpt-4o-mini",
+                    "system_prompt": "You are an FDA 510(k) analyst.",
+                    "max_tokens": 12000,
+                },
+                "pdf_to_markdown_agent": {
+                    "name": "PDF to Markdown Agent",
+                    "model": "gemini-2.5-flash",
+                    "system_prompt": "You convert PDF-extracted text into clean markdown.",
+                    "max_tokens": 12000,
+                },
+                "tw_screen_review_agent": {
+                    "name": "TW Premarket Screen Review Agent",
+                    "model": "gemini-2.5-flash",
+                    "system_prompt": "You are a TFDA premarket screen reviewer.",
+                    "max_tokens": 12000,
+                },
+                "tw_app_doc_helper": {
+                    "name": "TW Application Doc Helper",
+                    "model": "gpt-4o-mini",
+                    "system_prompt": "You help improve TFDA application documents.",
+                    "max_tokens": 12000,
+                },
+            }
+        }
 
-# Render sidebar (WOW UI + API keys + optional agents.yaml override)
 render_sidebar()
+apply_style(st.session_state.settings["theme"], st.session_state.settings["painter_style"])
 
-# Apply WOW painter style & theme CSS
-apply_style(
-    st.session_state.settings["theme"],
-    st.session_state.settings["painter_style"],
-)
-
-# Tabs with localized labels (+ SKILL.md tab)
-lang = st.session_state.settings["language"]
 tab_labels = [
     t("Dashboard"),
+    t("TW Premarket"),
     t("510k_tab"),
     t("PDF → Markdown"),
-    t("Summary & Entities"),
-    t("Comparator"),
     t("Checklist & Report"),
     t("Note Keeper & Magics"),
-    t("FDA Orchestration"),
-    t("Dynamic Agents"),
-    t("SKILL Panel"),
+    t("Agents Config"),
 ]
 tabs = st.tabs(tab_labels)
 
 with tabs[0]:
     render_dashboard()
 with tabs[1]:
-    render_510k_tab()
+    render_tw_premarket_tab()
 with tabs[2]:
-    render_pdf_to_md_tab()
+    render_510k_tab()
 with tabs[3]:
-    render_summary_tab()
+    render_pdf_to_md_tab()
 with tabs[4]:
-    render_diff_tab()
+    render_510k_review_pipeline_tab()
 with tabs[5]:
-    render_checklist_tab()
-with tabs[6]:
     render_note_keeper_tab()
-with tabs[7]:
-    render_fda_orchestration_tab()
-with tabs[8]:
-    render_dynamic_agents_tab()
-with tabs[9]:
-    render_skill_tab()
+with tabs[6]:
+    render_agents_config_tab()
